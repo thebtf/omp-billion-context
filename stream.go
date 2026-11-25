@@ -21,7 +21,7 @@ type streamClose struct {
 
 func (p *plugin) forwardStream(req executorRequest, body io.Reader) {
 	closeMessage := streamClose{StreamID: req.StreamID}
-	defer func() { p.call("host.stream.close", closeMessage) }()
+	defer func() { p.call("host.stream.close", closeMessage, nil) }()
 
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 32<<10), maxSSEFrameBytes)
@@ -64,7 +64,7 @@ func (p *plugin) forwardStream(req executorRequest, body io.Reader) {
 			}
 			payload = frame.responsesPayload()
 		}
-		if !p.call("host.stream.emit", streamEmit{StreamID: req.StreamID, Payload: payload}) || terminal {
+		if p.call("host.stream.emit", streamEmit{StreamID: req.StreamID, Payload: payload}, nil) != nil || terminal {
 			return
 		}
 		frame.reset()

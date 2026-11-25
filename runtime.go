@@ -34,7 +34,7 @@ type engine struct {
 	token  string
 }
 
-func startEngine(ctx context.Context, upstream string) (engine, error) {
+func startEngine(ctx context.Context) (engine, error) {
 	data, err := bundledRuntime.ReadFile("bundle/runtime.zip")
 	if err != nil {
 		return engine{}, errors.New("library was built without the billion-context runtime")
@@ -58,17 +58,10 @@ func startEngine(ctx context.Context, upstream string) (engine, error) {
 	}
 	defer listener.Close()
 	addr := listener.Addr().(*net.TCPAddr)
-	stateRoot, err := os.UserConfigDir()
-	if err != nil {
-		return engine{}, err
-	}
-	stateRoot = filepath.Join(stateRoot, pluginID)
-	if err := os.MkdirAll(stateRoot, 0o700); err != nil {
-		return engine{}, err
-	}
+	stateRoot := root
 	configPath := filepath.Join(root, "bili.json")
 	cfg, err := json.Marshal(map[string]any{
-		"host": "127.0.0.1", "port": addr.Port, "upstream": upstream, "logFile": "off",
+		"host": "127.0.0.1", "port": addr.Port, "upstream": "http://127.0.0.1:1", "logFile": "off",
 		"mitm": map[string]bool{"enabled": false},
 	})
 	if err != nil {
@@ -100,7 +93,7 @@ func startEngine(ctx context.Context, upstream string) (engine, error) {
 	cmd.Dir = root
 	cmd.Env = append(engineEnv(), "BILI_STRICT_PORT="+stringPort(addr), "BILI_SESSIONS_DIR="+filepath.Join(stateRoot, "sessions"),
 		"XDG_CONFIG_HOME="+stateRoot, "XDG_DATA_HOME="+stateRoot, "XDG_STATE_HOME="+stateRoot, "XDG_CACHE_HOME="+stateRoot,
-		"BILI_ADVISORY_CHECK=0", "BILI_RELEASE_NOTES_CHECK=0", "OMP_ENGINE_TOKEN="+token, "OMP_ENGINE_PROOF="+proof)
+		"BILI_PERSIST=0", "BILI_RESUME_INHERITANCE=0", "BILI_FORK_ADOPTION=0", "BILI_ADVISORY_CHECK=0", "BILI_RELEASE_NOTES_CHECK=0", "OMP_ENGINE_TOKEN="+token, "OMP_ENGINE_PROOF="+proof)
 	configureProcess(cmd)
 	parent, err := cmd.StdinPipe()
 	if err != nil {

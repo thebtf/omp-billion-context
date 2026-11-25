@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"sync"
 )
 
@@ -25,9 +26,9 @@ type routeRequest struct {
 	RequestedModel string
 	SourceFormat   protocol
 	Headers        http.Header
-	Metadata       struct {
-		RequestPath string `json:"request_path"`
-	}
+	Query          url.Values
+	Metadata       map[string]any
+	Body           []byte
 }
 
 type routeResponse struct {
@@ -36,14 +37,18 @@ type routeResponse struct {
 }
 
 type executorRequest struct {
-	Model        string
-	SourceFormat protocol
-	Format       protocol
-	Alt          string
-	Stream       bool
-	Headers      http.Header
-	Payload      []byte
-	StreamID     string `json:"stream_id"`
+	Model           string
+	SourceFormat    protocol
+	Format          protocol
+	Alt             string
+	Stream          bool
+	Headers         http.Header
+	Query           url.Values
+	Metadata        map[string]any
+	OriginalRequest []byte
+	Payload         []byte
+	StreamID        string `json:"stream_id"`
+	HostCallbackID  string `json:"host_callback_id"`
 }
 
 type executorResponse struct {
@@ -67,12 +72,12 @@ type rpcEnvelope struct {
 	Error  *rpcError `json:"error,omitempty"`
 }
 
-type hostCall func(method string, payload any) bool
+type hostCall func(method string, payload any, into any) *rpcError
 
 type plugin struct {
-	cfg      config
 	engineMu sync.Mutex
 	engine   engine
+	relay    *modelRelay
 	call     hostCall
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -82,29 +87,32 @@ type plugin struct {
 
 func main() {}
 
-func newPlugin(cfg config, call hostCall) *plugin {
+func newPlugin(call hostCall) *plugin {
 	ctx, cancel := context.WithCancel(context.Background())
-	p := &plugin{cfg: cfg, call: call, ctx: ctx, cancel: cancel}
-	if cfg.sidecar.Host != "" {
-		p.engine = engine{url: cfg.sidecar, client: sidecarClient(cfg.sidecar.Host)}
-	}
-	return p
+	return &plugin{call: call, ctx: ctx, cancel: cancel}
 }
 
-func (p *plugin) runningEngine() (engine, error) {
+func (p *plugin) runningEngine() (engine, *modelRelay, error) {
 	p.engineMu.Lock()
 	defer p.engineMu.Unlock()
 	if err := p.ctx.Err(); err != nil {
-		return engine{}, err
+		return engine{}, nil, err
+	}
+	if p.relay == nil {
+		relay, err := newModelRelay()
+		if err != nil {
+			return engine{}, nil, err
+		}
+		p.relay = relay
 	}
 	if p.engine.client == nil {
-		started, err := startEngine(p.ctx, p.cfg.upstream)
+		started, err := startEngine(p.ctx)
 		if err != nil {
-			return engine{}, err
+			return engine{}, nil, err
 		}
 		p.engine = started
 	}
-	return p.engine, nil
+	return p.engine, p.relay, nil
 }
 
 func (p *plugin) shutdown() {
@@ -120,7 +128,11 @@ func (p *plugin) shutdown() {
 	if p.engine.stop != nil {
 		p.engine.stop()
 	}
+	if p.relay != nil {
+		p.relay.stop()
+	}
 	p.engine = engine{}
+	p.relay = nil
 }
 
 func (p *plugin) handle(method string, raw []byte) (any, *rpcError) {
@@ -135,10 +147,11 @@ func (p *plugin) handle(method string, raw []byte) (any, *rpcError) {
 		if json.Unmarshal(raw, &req) != nil {
 			return nil, &rpcError{Code: "invalid_request", Message: "invalid model route request"}
 		}
-		path, supported := paths[req.SourceFormat]
-		if supported && p.cfg.alias != "" && req.RequestedModel == p.cfg.alias && req.Headers.Get("Upgrade") == "" &&
-			(req.Metadata.RequestPath == "" || req.Metadata.RequestPath == path) {
-			// A self route keeps the requested model in CPA.
+		alt := req.Query.Get("alt")
+		if !req.Query.Has("alt") {
+			alt = req.Query.Get("$alt")
+		}
+		if (alt == "" || alt == "sse") && requestSession(req.RequestedModel, req.SourceFormat, req.Headers, req.Metadata, req.Body) != "" {
 			return routeResponse{Handled: true, TargetKind: "self"}, nil
 		}
 		return routeResponse{}, nil
@@ -150,8 +163,8 @@ func (p *plugin) handle(method string, raw []byte) (any, *rpcError) {
 			return nil, &rpcError{Code: "invalid_request", Message: "invalid executor request", HTTPStatus: http.StatusBadRequest}
 		}
 		stream := method == "executor.execute_stream"
-		if stream != req.Stream || (stream && (req.StreamID == "" || p.call == nil)) {
-			return nil, &rpcError{Code: "invalid_request", Message: "invalid executor stream mode", HTTPStatus: http.StatusBadRequest}
+		if p.call == nil || req.HostCallbackID == "" || stream != req.Stream || (stream && req.StreamID == "") {
+			return nil, &rpcError{Code: "invalid_request", Message: "invalid executor context", HTTPStatus: http.StatusBadRequest}
 		}
 		return p.execute(req)
 	default:
