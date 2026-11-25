@@ -137,7 +137,11 @@ try {
 		}
 	}
 	assert(requests.some(({ body }) => body.tools?.some(tool => ['acp_status', 'compress', 'acp_compress'].includes(tool.function?.name ?? tool.name))), 'The real billion-context process should inject context management tools');
-	console.log('billion-context injected context management tools; request without session identity bypassed it');
+	const opaque = await call('responses', { model, input: [{ type: 'reasoning', encrypted_content: 'opaque-fixture', summary: [] }, ...messages] });
+	const opaqueBody = await opaque.text();
+	assert.equal(opaque.status, 200, opaqueBody);
+	assert.equal(requests.at(-1).body.tools?.length ?? 0, 0, 'Encrypted continuation must stay on the ordinary CPA route');
+	console.log('Bundled bili injected tools; requests without session identity or with encrypted continuation bypassed it');
 
 	const engines = (await readdir(scratch)).filter(name => name.startsWith('omp-billion-context-'));
 	assert.equal(engines.length, 1, 'CPA must start exactly one bundled engine');

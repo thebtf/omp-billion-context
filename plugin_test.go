@@ -25,6 +25,7 @@ func TestCompressionOnlyForSupportedAuthenticatedConversations(t *testing.T) {
 		{"compact", responses, map[string]any{"caller_scope": "owner", "request_path": "/v1/responses/compact"}, nil, `{"input":"hello","prompt_cache_key":"conversation"}`, false},
 		{"opaque continuation", responses, map[string]any{"caller_scope": "owner", "request_path": paths[responses]}, nil, `{"input":"hello","prompt_cache_key":"conversation","previous_response_id":"opaque"}`, false},
 		{"native compaction", responses, map[string]any{"caller_scope": "owner", "request_path": paths[responses]}, nil, `{"input":[{"type":"compaction","encrypted_content":"opaque"}],"prompt_cache_key":"conversation"}`, false},
+		{"encrypted reasoning", responses, map[string]any{"caller_scope": "owner", "request_path": paths[responses]}, nil, `{"input":[{"type":"reasoning","encrypted_content":"opaque"}],"prompt_cache_key":"conversation"}`, false},
 		{"nested callback", chat, map[string]any{"caller_scope": "owner", "request_path": paths[chat], "source": "plugin_host_model_callback"}, http.Header{"X-Acp-Session": {"s"}}, `{"messages":[{}]}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -49,7 +49,7 @@ func requestSession(model string, format protocol, headers http.Header, metadata
 				case "compaction", "compaction_trigger", "item_reference":
 					return ""
 				}
-				if item.Type != "reasoning" && item.EncryptedContent != "" {
+				if item.EncryptedContent != "" {
 					return ""
 				}
 			}
