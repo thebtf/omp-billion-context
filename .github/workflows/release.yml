@@ -1,0 +1,68 @@
+name: Build CPA plugin
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { runner: windows-latest, os: windows, arch: amd64, ext: dll }
+          - { runner: ubuntu-latest, os: linux, arch: amd64, ext: so }
+          - { runner: macos-latest, os: darwin, arch: arm64, ext: dylib }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Build and package
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          EXT: ${{ matrix.ext }}
+        run: |
+          set -euo pipefail
+          version=0.1.0
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            [[ "$GITHUB_REF_NAME" == "v$version" ]] || exit 1
+          fi
+          go test ./...
+          mkdir -p dist
+          library="omp-billion-context.$EXT"
+          go build -buildmode=c-shared -o "$library" .
+          python -m zipfile -c "dist/omp-billion-context_${version}_${GOOS}_${GOARCH}.zip" "$library"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  package:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create CPA checksums
+        working-directory: dist
+        run: sha256sum ./*.zip | sed 's|  \./|  |' > checksums.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cpa-release
+          path: dist/
+          if-no-files-found: error
