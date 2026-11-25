@@ -26,6 +26,7 @@ type routeRequest struct {
 	RequestedModel string
 	SourceFormat   protocol
 	Headers        http.Header
+	Query          url.Values
 	Metadata       map[string]any
 	Body           []byte
 }
@@ -146,7 +147,11 @@ func (p *plugin) handle(method string, raw []byte) (any, *rpcError) {
 		if json.Unmarshal(raw, &req) != nil {
 			return nil, &rpcError{Code: "invalid_request", Message: "invalid model route request"}
 		}
-		if requestSession(req.RequestedModel, req.SourceFormat, req.Headers, req.Metadata, req.Body) != "" {
+		alt := req.Query.Get("alt")
+		if !req.Query.Has("alt") {
+			alt = req.Query.Get("$alt")
+		}
+		if (alt == "" || alt == "sse") && requestSession(req.RequestedModel, req.SourceFormat, req.Headers, req.Metadata, req.Body) != "" {
 			return routeResponse{Handled: true, TargetKind: "self"}, nil
 		}
 		return routeResponse{}, nil

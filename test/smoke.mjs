@@ -21,6 +21,7 @@ const target = 'gpt-5.4';
 const foldMarker = 'SHOULD_BE_FOLDED_';
 const foldSummary = 'The earlier test turns discussed workspace setup, model routing and synthetic results. The remaining turns verify that the new context keeps its recent messages.';
 let requestedFold = false;
+let streamTail;
 
 const upstream = createServer(async (req, res) => {
 	try {
@@ -40,6 +41,7 @@ const upstream = createServer(async (req, res) => {
 				return res.end(`data: ${JSON.stringify(response)}\n\ndata: ${JSON.stringify(completed)}\n\ndata: [DONE]\n\n`);
 			}
 			res.write(`data: ${JSON.stringify({ ...base, object: 'chat.completion.chunk', choices: [{ index: 0, delta: { role: 'assistant', content: 'smoke-ok' }, finish_reason: null }] })}\n\n`);
+			if (streamTail) await streamTail;
 			res.end(`data: ${JSON.stringify({ ...base, object: 'chat.completion.chunk', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`);
 		} else {
 			res.writeHead(200, { 'content-type': 'application/json' });
@@ -124,11 +126,30 @@ try {
 
 	for (const [path, input] of [['chat/completions', { messages }], ['responses', { input: messages }]]) {
 		for (const stream of [false, true]) {
-			const result = await call(path, { model, ...input, stream });
-			const text = await result.text();
-			assert.equal(result.status, 200, text);
-			assert.match(text, /smoke-ok/);
-			if (stream) assert.match(result.headers.get('content-type'), /text\/event-stream/);
+			let release;
+			if (stream) streamTail = new Promise(done => { release = done; });
+			try {
+				const result = await call(path, { model, ...input, stream });
+				assert.equal(result.status, 200);
+				if (stream) {
+					assert.match(result.headers.get('content-type'), /text\/event-stream/);
+					const reader = result.body.getReader();
+					const decoder = new TextDecoder();
+					let prefix = '';
+					while (!prefix.includes('smoke-ok')) {
+						const chunk = await reader.read();
+						assert(!chunk.done, 'Provider is still waiting to finish. The first text must already arrive.');
+						prefix += decoder.decode(chunk.value, { stream: true });
+					}
+					release();
+					while (!(await reader.read()).done) { }
+				} else {
+					assert.match(await result.text(), /smoke-ok/);
+				}
+			} finally {
+				release?.();
+				streamTail = undefined;
+			}
 			const received = requests.at(-1);
 			assert.equal(received.path, '/v1/chat/completions');
 			assert.equal(received.body.model, target);
@@ -141,7 +162,11 @@ try {
 	const opaqueBody = await opaque.text();
 	assert.equal(opaque.status, 200, opaqueBody);
 	assert.equal(requests.at(-1).body.tools?.length ?? 0, 0, 'Encrypted continuation must stay on the ordinary CPA route');
-	console.log('Bundled bili injected tools; requests without session identity or with encrypted continuation bypassed it');
+	const alternate = await call('chat/completions?alt=json', { model, messages });
+	const alternateBody = await alternate.text();
+	assert.equal(alternate.status, 200, alternateBody);
+	assert.equal(requests.at(-1).body.tools?.length ?? 0, 0, 'Alternate modes must stay on the ordinary CPA route');
+	console.log('Bundled bili injected tools; unsupported requests bypassed it');
 
 	const engines = (await readdir(scratch)).filter(name => name.startsWith('omp-billion-context-'));
 	assert.equal(engines.length, 1, 'CPA must start exactly one bundled engine');
