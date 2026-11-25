@@ -162,6 +162,14 @@ try {
 	const opaqueBody = await opaque.text();
 	assert.equal(opaque.status, 200, opaqueBody);
 	assert.equal(requests.at(-1).body.tools?.length ?? 0, 0, 'Encrypted continuation must stay on the ordinary CPA route');
+	for (const query of ['alt=sse', '$alt=sse']) {
+		const sse = await call(`chat/completions?${query}`, { model, messages, stream: true });
+		const sseBody = await sse.text();
+		assert.equal(sse.status, 200, sseBody);
+		assert.match(sse.headers.get('content-type'), /text\/event-stream/);
+		assert.match(sseBody, /smoke-ok/);
+		assert(requests.at(-1).body.tools?.length, 'CPA normalizes explicit SSE to the standard compression path');
+	}
 	const alternate = await call('chat/completions?alt=json', { model, messages });
 	const alternateBody = await alternate.text();
 	assert.equal(alternate.status, 200, alternateBody);
