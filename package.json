@@ -1,0 +1,10 @@
+{
+  "name": "omp-billion-context-runtime",
+  "private": true,
+  "engines": {
+    "node": "24.22.3"
+  },
+  "dependencies": {
+    "billion-context": "0.1.216"
+  }
+}

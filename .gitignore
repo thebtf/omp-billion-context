@@ -1,0 +1,9 @@
+/.work/
+/dist/
+/node_modules/
+/bundle/.runtime-*/
+/bundle/runtime.zip
+/*.dll
+/*.so
+/*.dylib
+/*.h
