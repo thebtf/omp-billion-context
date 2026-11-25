@@ -52,6 +52,7 @@ static void free_host_buffer(const cliproxy_host_api* host, cliproxy_buffer* out
 import "C"
 
 import (
+	"bytes"
 	"encoding/json"
 	"sync/atomic"
 	"unsafe"
@@ -59,26 +60,18 @@ import (
 
 const abiVersion = 1
 
-type nativeInstance struct {
-	plugin      *plugin
-	configError error
-}
-
-var native atomic.Pointer[nativeInstance]
+var native atomic.Pointer[plugin]
 
 //export cliproxy_plugin_init
 func cliproxy_plugin_init(host *C.cliproxy_host_api, api *C.cliproxy_plugin_api) C.int {
 	if host == nil || api == nil || host.abi_version != abiVersion || host.call == nil || host.free_buffer == nil {
 		return 1
 	}
-	cfg, err := loadConfig()
-	instance := &nativeInstance{configError: err}
-	if err == nil {
-		instance.plugin = newPlugin(cfg, func(method string, payload any) bool {
-			return nativeHostCall(host, method, payload)
-		})
-	}
+	instance := newPlugin(func(method string, payload any, into any) *rpcError {
+		return nativeHostCall(host, method, payload, into)
+	})
 	if !native.CompareAndSwap(nil, instance) {
+		instance.shutdown()
 		return 1
 	}
 	C.set_plugin_api(api, abiVersion)
@@ -97,12 +90,10 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 	switch {
 	case instance == nil:
 		failure = &rpcError{Code: "plugin_unavailable", Message: "plugin is not initialized"}
-	case instance.configError != nil:
-		failure = &rpcError{Code: "invalid_config", Message: instance.configError.Error()}
 	case method == nil || (request == nil && requestLen != 0) || requestLen > 1<<31-1:
 		failure = &rpcError{Code: "invalid_request", Message: "invalid native RPC request"}
 	default:
-		result, failure = instance.plugin.handle(C.GoString(method), unsafe.Slice((*byte)(unsafe.Pointer(request)), int(requestLen)))
+		result, failure = instance.handle(C.GoString(method), unsafe.Slice((*byte)(unsafe.Pointer(request)), int(requestLen)))
 	}
 	encoded, err := json.Marshal(rpcEnvelope{OK: failure == nil, Result: result, Error: failure})
 	if err != nil {
@@ -120,15 +111,15 @@ func cliproxyPluginFree(ptr unsafe.Pointer, _ C.size_t) {
 
 //export cliproxyPluginShutdown
 func cliproxyPluginShutdown() {
-	if instance := native.Swap(nil); instance != nil && instance.plugin != nil {
-		instance.plugin.shutdown()
+	if instance := native.Swap(nil); instance != nil {
+		instance.shutdown()
 	}
 }
 
-func nativeHostCall(host *C.cliproxy_host_api, method string, payload any) bool {
+func nativeHostCall(host *C.cliproxy_host_api, method string, payload any, into any) *rpcError {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
-		return false
+		return &rpcError{Code: "host_callback_request", Message: "could not encode " + method + " request"}
 	}
 	name := C.CString(method)
 	defer C.free(unsafe.Pointer(name))
@@ -137,9 +128,25 @@ func nativeHostCall(host *C.cliproxy_host_api, method string, payload any) bool 
 	if out.ptr != nil {
 		defer C.free_host_buffer(host, &out)
 	}
-	if rc != 0 || out.ptr == nil || out.len > 1<<31-1 {
-		return false
+	if out.ptr == nil || out.len == 0 || out.len > 1<<31-1 {
+		return &rpcError{Code: "host_callback_response", Message: method + " returned no valid response"}
 	}
-	var status struct{ OK bool `json:"ok"` }
-	return json.Unmarshal(unsafe.Slice((*byte)(out.ptr), int(out.len)), &status) == nil && status.OK
+	var envelope struct {
+		OK     bool            `json:"ok"`
+		Result json.RawMessage `json:"result"`
+		Error  *rpcError       `json:"error"`
+	}
+	if json.Unmarshal(unsafe.Slice((*byte)(out.ptr), int(out.len)), &envelope) != nil {
+		return &rpcError{Code: "host_callback_response", Message: method + " returned an invalid response"}
+	}
+	if !envelope.OK && envelope.Error != nil {
+		return envelope.Error
+	}
+	if rc != 0 || !envelope.OK {
+		return &rpcError{Code: "host_callback_failed", Message: method + " failed"}
+	}
+	if into != nil && (bytes.Equal(envelope.Result, []byte("null")) || json.Unmarshal(envelope.Result, into) != nil) {
+		return &rpcError{Code: "host_callback_response", Message: method + " returned an invalid result"}
+	}
+	return nil
 }

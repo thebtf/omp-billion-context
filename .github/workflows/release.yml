@@ -14,9 +14,24 @@ jobs:
     strategy:
       matrix:
         include:
-          - { runner: windows-latest, os: windows, arch: amd64, ext: dll }
-          - { runner: ubuntu-latest, os: linux, arch: amd64, ext: so }
-          - { runner: macos-latest, os: darwin, arch: arm64, ext: dylib }
+          - runner: windows-latest
+            os: windows
+            arch: amd64
+            ext: dll
+            cpa_asset: CLIProxyAPI_8.1.4_windows_amd64.zip
+            cpa_sha: 665b670d42a5ceeadd33a6f03dffaa362cde920b726ab6b117c4def94ff81b09
+          - runner: ubuntu-latest
+            os: linux
+            arch: amd64
+            ext: so
+            cpa_asset: CLIProxyAPI_8.1.4_linux_amd64.tar.gz
+            cpa_sha: d36d5304eded3884cd0c4168c41a7638a3234631a64a54644069b963ae287cea
+          - runner: macos-latest
+            os: darwin
+            arch: arm64
+            ext: dylib
+            cpa_asset: CLIProxyAPI_8.1.4_darwin_aarch64.tar.gz
+            cpa_sha: 9d9e2350d4af9c2cd1c3636a5892e3b669829284f3a54b252fe1bdfb6b49d93a
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +65,26 @@ jobs:
           library="omp-billion-context.$EXT"
           go build -buildmode=c-shared -o "$library" .
           python -m zipfile -c "dist/omp-billion-context_${version}_${GOOS}_${GOARCH}.zip" "$library"
+      - name: Verify bundled compression through CPA
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CPA_ASSET: ${{ matrix.cpa_asset }}
+          CPA_SHA: ${{ matrix.cpa_sha }}
+          EXT: ${{ matrix.ext }}
+        run: |
+          set -euo pipefail
+          mkdir -p .work/tmp/cpa
+          gh release download v8.1.4 --repo router-for-me/CLIProxyAPI --pattern "$CPA_ASSET" --dir .work/tmp/cpa
+          python -c 'import hashlib, os, pathlib; path=pathlib.Path(".work/tmp/cpa") / os.environ["CPA_ASSET"]; assert hashlib.sha256(path.read_bytes()).hexdigest() == os.environ["CPA_SHA"], "CPA archive checksum mismatch"'
+          if [[ "$CPA_ASSET" == *.zip ]]; then
+            python -m zipfile -e ".work/tmp/cpa/$CPA_ASSET" .work/tmp/cpa
+            cpa=.work/tmp/cpa/cli-proxy-api.exe
+          else
+            tar -xzf ".work/tmp/cpa/$CPA_ASSET" -C .work/tmp/cpa
+            cpa=.work/tmp/cpa/cli-proxy-api
+          fi
+          node test/smoke.mjs "$cpa" "omp-billion-context.$EXT"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.os }}-${{ matrix.arch }}
