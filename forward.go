@@ -66,7 +66,7 @@ func sessionID(headers http.Header) string {
 
 func (p *plugin) execute(req executorRequest) (any, *rpcError) {
 	path, supported := paths[req.SourceFormat]
-	if !supported || req.SourceFormat != req.Format || req.Model != p.cfg.alias || req.Alt != "" {
+	if !supported || p.cfg.alias == "" || req.SourceFormat != req.Format || req.Model != p.cfg.alias || req.Alt != "" {
 		return nil, &rpcError{Code: "unsupported_request", Message: "unsupported model or protocol", HTTPStatus: http.StatusBadRequest}
 	}
 	if !p.cfg.authorized(req.Headers) {
@@ -92,7 +92,11 @@ func (p *plugin) execute(req executorRequest) (any, *rpcError) {
 	}
 
 	// Keep the authority fixed. Bili routes the configured absolute upstream embedded in the path.
-	destination := p.cfg.sidecar
+	running, err := p.runningEngine()
+	if err != nil {
+		return nil, &rpcError{Code: "engine_unavailable", Message: "could not start bundled billion-context", HTTPStatus: http.StatusServiceUnavailable}
+	}
+	destination := running.url
 	destination.Path = "/bili/" + p.cfg.upstream + path
 	timeout, contentType := nonStreamTimeout, "application/json"
 	if req.Stream {
@@ -111,7 +115,10 @@ func (p *plugin) execute(req executorRequest) (any, *rpcError) {
 	if p.cfg.upstreamToken != "" {
 		request.Header.Set("Authorization", "Bearer "+p.cfg.upstreamToken)
 	}
-	response, err := p.client.Do(request)
+	if running.token != "" {
+		request.Header.Set("X-Omp-Bili-Access", running.token)
+	}
+	response, err := running.client.Do(request)
 	if err != nil {
 		cancel()
 		return nil, sidecarFailure(err)

@@ -3,11 +3,8 @@ package main
 import (
 	"crypto/sha256"
 	"errors"
-	"net"
-	"net/netip"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 )
 
@@ -21,19 +18,6 @@ type config struct {
 }
 
 func readConfig(getenv func(string) string) (config, error) {
-	sidecar, ok := httpURL(getenv("OMP_BILI_SIDECAR_URL"))
-	invalidSidecar := errors.New("OMP_BILI_SIDECAR_URL must be an HTTP numeric loopback origin with a port")
-	if !ok || sidecar.Scheme != "http" || (sidecar.Path != "" && sidecar.Path != "/") {
-		return config{}, invalidSidecar
-	}
-	ip, errIP := netip.ParseAddr(sidecar.Hostname())
-	port, errPort := strconv.ParseUint(sidecar.Port(), 10, 16)
-	if errIP != nil || !ip.IsLoopback() || ip.Zone() != "" || errPort != nil || port == 0 {
-		return config{}, invalidSidecar
-	}
-	sidecar.Host = net.JoinHostPort(ip.String(), strconv.FormatUint(port, 10))
-	sidecar.Path = ""
-
 	upstream, ok := httpURL(getenv("OMP_BILI_UPSTREAM_URL"))
 	if !ok {
 		return config{}, errors.New("OMP_BILI_UPSTREAM_URL must be an absolute HTTP(S) base without credentials, query, fragment or path escapes")
@@ -66,12 +50,15 @@ func readConfig(getenv func(string) string) (config, error) {
 		return config{}, errors.New("OMP_BILI_UPSTREAM_TOKEN must be a separate bearer token")
 	}
 	return config{
-		sidecar: *sidecar, upstream: upstream.String(), alias: alias, model: model,
+		upstream: upstream.String(), alias: alias, model: model,
 		clientSum: sha256.Sum256([]byte(clientToken)), upstreamToken: upstreamToken,
 	}, nil
 }
 
 func loadConfig() (config, error) {
+	if os.Getenv("OMP_BILI_MODEL_ALIAS") == "" {
+		return config{}, nil
+	}
 	return readConfig(os.Getenv)
 }
 

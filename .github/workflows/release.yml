@@ -2,6 +2,7 @@ name: Build CPA plugin
 
 on:
   workflow_dispatch:
+  pull_request:
   push:
     tags: ["v*"]
 
@@ -26,6 +27,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: package.json
       - name: Build and package
         shell: bash
         env:
@@ -39,6 +43,8 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
             [[ "$GITHUB_REF_NAME" == "v$version" ]] || exit 1
           fi
+          npm ci --omit=dev --ignore-scripts
+          python scripts/package_runtime.py --target "$GOOS-$GOARCH"
           go test ./...
           mkdir -p dist
           library="omp-billion-context.$EXT"

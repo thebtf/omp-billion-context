@@ -71,7 +71,8 @@ type hostCall func(method string, payload any) bool
 
 type plugin struct {
 	cfg      config
-	client   *http.Client
+	engineMu sync.Mutex
+	engine   engine
 	call     hostCall
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -83,7 +84,27 @@ func main() {}
 
 func newPlugin(cfg config, call hostCall) *plugin {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &plugin{cfg: cfg, client: sidecarClient(cfg.sidecar.Host), call: call, ctx: ctx, cancel: cancel}
+	p := &plugin{cfg: cfg, call: call, ctx: ctx, cancel: cancel}
+	if cfg.sidecar.Host != "" {
+		p.engine = engine{url: cfg.sidecar, client: sidecarClient(cfg.sidecar.Host)}
+	}
+	return p
+}
+
+func (p *plugin) runningEngine() (engine, error) {
+	p.engineMu.Lock()
+	defer p.engineMu.Unlock()
+	if err := p.ctx.Err(); err != nil {
+		return engine{}, err
+	}
+	if p.engine.client == nil {
+		started, err := startEngine(p.ctx, p.cfg.upstream)
+		if err != nil {
+			return engine{}, err
+		}
+		p.engine = started
+	}
+	return p.engine, nil
 }
 
 func (p *plugin) shutdown() {
@@ -91,7 +112,15 @@ func (p *plugin) shutdown() {
 	p.cancel()
 	p.streamMu.Unlock()
 	p.streams.Wait()
-	p.client.CloseIdleConnections()
+	p.engineMu.Lock()
+	defer p.engineMu.Unlock()
+	if p.engine.client != nil {
+		p.engine.client.CloseIdleConnections()
+	}
+	if p.engine.stop != nil {
+		p.engine.stop()
+	}
+	p.engine = engine{}
 }
 
 func (p *plugin) handle(method string, raw []byte) (any, *rpcError) {
@@ -107,7 +136,7 @@ func (p *plugin) handle(method string, raw []byte) (any, *rpcError) {
 			return nil, &rpcError{Code: "invalid_request", Message: "invalid model route request"}
 		}
 		path, supported := paths[req.SourceFormat]
-		if supported && req.RequestedModel == p.cfg.alias && req.Headers.Get("Upgrade") == "" &&
+		if supported && p.cfg.alias != "" && req.RequestedModel == p.cfg.alias && req.Headers.Get("Upgrade") == "" &&
 			(req.Metadata.RequestPath == "" || req.Metadata.RequestPath == path) {
 			// A self route keeps the requested model in CPA.
 			return routeResponse{Handled: true, TargetKind: "self"}, nil

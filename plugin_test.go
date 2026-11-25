@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,14 +15,19 @@ import (
 func testPlugin(t *testing.T, sidecarURL string, call hostCall) *plugin {
 	t.Helper()
 	env := map[string]string{
-		"OMP_BILI_SIDECAR_URL": sidecarURL, "OMP_BILI_UPSTREAM_URL": "https://example.invalid/gateway",
-		"OMP_BILI_MODEL_ALIAS": "bili-opt-in", "OMP_BILI_TARGET_MODEL": "real-model",
+		"OMP_BILI_UPSTREAM_URL": "https://example.invalid/gateway",
+		"OMP_BILI_MODEL_ALIAS":  "bili-opt-in", "OMP_BILI_TARGET_MODEL": "real-model",
 		"OMP_BILI_CLIENT_TOKEN": "client-secret", "OMP_BILI_UPSTREAM_TOKEN": "upstream-secret",
 	}
 	cfg, err := readConfig(func(key string) string { return env[key] })
 	if err != nil {
 		t.Fatal(err)
 	}
+	sidecar, err := url.Parse(sidecarURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.sidecar = *sidecar
 	p := newPlugin(cfg, call)
 	t.Cleanup(p.shutdown)
 	return p

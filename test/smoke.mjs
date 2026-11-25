@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { basename, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const args = process.argv.slice(2);
-assert.equal(args.length, 3, 'Usage: node test/smoke.mjs <cpa-executable> <bili-dist/index.js> <plugin-library>');
-const [cpaPath, biliPath, pluginPath] = args.map(path => resolve(path));
+assert.equal(args.length, 2, 'Usage: node test/smoke.mjs <cpa-executable> <plugin-library>');
+const [cpaPath, pluginPath] = args.map(path => resolve(path));
 const tmp = resolve('.work', 'tmp');
 await mkdir(tmp, { recursive: true });
 const scratch = await mkdtemp(join(tmp, 'integration-'));
@@ -27,7 +27,7 @@ const upstream = createServer(async (req, res) => {
 		const chunks = [];
 		for await (const chunk of req) chunks.push(chunk);
 		const body = JSON.parse(Buffer.concat(chunks));
-		requests.push({ path: req.url, auth: req.headers.authorization, body });
+		requests.push({ path: req.url, auth: req.headers.authorization, engineToken: req.headers['x-omp-bili-access'], body });
 		const base = { id: 'chatcmpl-smoke', created: 1, model: body.model };
 		if (req.url === '/v1/responses') {
 			const response = {
@@ -83,8 +83,8 @@ async function freePort() {
 }
 
 function start(executable, args, vars) {
-	const baseline = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(ACP_|BILI_|OMP_BILI_|NODE_OPTIONS$|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$)/i.test(key)));
-	const env = { ...baseline, HOME: scratch, USERPROFILE: scratch, APPDATA: scratch, LOCALAPPDATA: scratch, XDG_CONFIG_HOME: scratch, XDG_DATA_HOME: scratch, XDG_STATE_HOME: scratch, ...vars };
+	const baseline = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(ACP_|BILI_|OMP_BILI_|NODE_OPTIONS$|PATH$|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$)/i.test(key)));
+	const env = { ...baseline, PATH: '', TEMP: scratch, TMP: scratch, TMPDIR: scratch, HOME: scratch, USERPROFILE: scratch, APPDATA: scratch, LOCALAPPDATA: scratch, XDG_CONFIG_HOME: scratch, XDG_DATA_HOME: scratch, XDG_STATE_HOME: scratch, ...vars };
 	const child = spawn(executable, args, { cwd: scratch, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
 	const record = { child, log: '', stopped: new Promise(done => child.once('close', done)) };
 	child.on('error', error => { record.log += `${error}\n`; });
@@ -107,16 +107,6 @@ async function ready(url, record, headers) {
 
 try {
 	const upstreamUrl = `http://127.0.0.1:${await listen(upstream)}`;
-	const biliPort = await freePort();
-	const biliUrl = `http://127.0.0.1:${biliPort}`;
-	const biliConfig = join(scratch, 'bili.json');
-	await writeFile(biliConfig, JSON.stringify({ host: '127.0.0.1', port: biliPort, upstream: upstreamUrl, logFile: 'off' }));
-	const bili = start(process.execPath, [biliPath, 'start', '--config', biliConfig, '--no-auto-update', '--no-passthrough'], {
-		BILI_SESSIONS_DIR: join(scratch, 'sessions'), BILI_STRICT_PORT: String(biliPort),
-		BILI_ADVISORY_CHECK: '0', BILI_RELEASE_NOTES_CHECK: '0',
-	});
-	await ready(`${biliUrl}/__bili/health`, bili);
-
 	const pluginDir = join(scratch, 'plugins');
 	const cpaPort = await freePort();
 	const cpaUrl = `http://127.0.0.1:${cpaPort}`;
@@ -125,7 +115,7 @@ try {
 	await copyFile(pluginPath, join(pluginDir, basename(pluginPath)));
 	await writeFile(cpaConfig, `host: 127.0.0.1\nport: ${cpaPort}\nauth-dir: ${JSON.stringify(join(scratch, 'auth'))}\napi-keys: [${clientKey}, synthetic-other-client]\nremote-management:\n  secret-key: synthetic-management\n  disable-control-panel: true\nplugins:\n  enabled: true\n  dir: ${JSON.stringify(pluginDir)}\n  configs:\n    omp-billion-context:\n      enabled: true\nopenai-compatibility:\n  - name: fake\n    base-url: ${upstreamUrl}/v1\n    api-key-entries:\n      - api-key: synthetic-direct\n    models:\n      - name: direct-model\n`);
 	const cpa = start(cpaPath, ['-config', cpaConfig, '-local-model'], {
-		OMP_BILI_SIDECAR_URL: biliUrl, OMP_BILI_UPSTREAM_URL: upstreamUrl,
+		OMP_BILI_UPSTREAM_URL: upstreamUrl,
 		OMP_BILI_MODEL_ALIAS: alias, OMP_BILI_TARGET_MODEL: target,
 		OMP_BILI_CLIENT_TOKEN: clientKey, OMP_BILI_UPSTREAM_TOKEN: upstreamKey,
 	});
@@ -138,7 +128,7 @@ try {
 	const messages = [{ role: 'user', content: 'Synthetic conversation' }];
 	function call(path, body, headers = {}) {
 		return fetch(`${cpaUrl}/v1/${path}`, {
-			method: 'POST', body: JSON.stringify(body), signal: AbortSignal.timeout(20000),
+			method: 'POST', body: JSON.stringify(body), signal: AbortSignal.timeout(35000),
 			headers: { 'content-type': 'application/json', authorization: `Bearer ${clientKey}`, 'x-acp-session': 'smoke-session', ...headers },
 		});
 	}
@@ -172,6 +162,14 @@ try {
 	}
 	assert(requests.some(({ body }) => body.tools?.some(tool => ['acp_status', 'compress', 'acp_compress'].includes(tool.function?.name ?? tool.name))), 'The real billion-context process should inject context management tools');
 	console.log('billion-context injected context management tools; unrelated model bypassed it');
+
+	const engines = (await readdir(scratch)).filter(name => name.startsWith('omp-billion-context-'));
+	assert.equal(engines.length, 1, 'CPA must start exactly one bundled engine');
+	const engineConfig = JSON.parse(await readFile(join(scratch, engines[0], 'bili.json'), 'utf8'));
+	const unauthorizedEngine = await fetch(`http://127.0.0.1:${engineConfig.port}/__bili/stats`);
+	assert.equal(unauthorizedEngine.status, 403);
+	await unauthorizedEngine.text();
+	assert(requests.every(request => request.engineToken === undefined), 'The engine access token must not reach the backend');
 
 	const history = Array.from({ length: 12 }, (_, index) => ({
 		type: 'message', role: index % 2 ? 'assistant' : 'user',
