@@ -83,6 +83,33 @@ func TestRuntimeDataRootUsesArtifactDirectory(t *testing.T) {
 	}
 }
 
+func TestRuntimeFileURL(t *testing.T) {
+	type fileURLCase struct {
+		name string
+		path string
+		want string
+	}
+	cases := []fileURLCase{
+		{"unix", "/opt/bili data/#instance/private-runtime.mjs", "file:///opt/bili%20data/%23instance/private-runtime.mjs"},
+	}
+	if runtime.GOOS == "windows" {
+		cases = []fileURLCase{
+			{"drive", `C:\bili data\#instance\private-runtime.mjs`, "file:///C:/bili%20data/%23instance/private-runtime.mjs"},
+			{"unc", `\\nas\share\bili data\#instance\private-runtime.mjs`, "file://nas/share/bili%20data/%23instance/private-runtime.mjs"},
+			{"extended drive", `\\?\C:\bili data\#instance\private-runtime.mjs`, "file:///C:/bili%20data/%23instance/private-runtime.mjs"},
+			{"extended unc", `\\?\UNC\nas\share\bili data\#instance\private-runtime.mjs`, "file://nas/share/bili%20data/%23instance/private-runtime.mjs"},
+		}
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runtimeFileURL(tc.path)
+			if got.String() != tc.want {
+				t.Fatalf("preload URL for %q = %q, want %q", tc.path, got.String(), tc.want)
+			}
+		})
+	}
+}
+
 func TestRuntimeColdInstallAndWarmReuse(t *testing.T) {
 	root := t.TempDir()
 	manifest, data := runtimeFixture(t, "first node")
@@ -93,9 +120,17 @@ func TestRuntimeColdInstallAndWarmReuse(t *testing.T) {
 		t.Fatal(err)
 	}
 	marker := filepath.Join(installed, "version.json")
-	before, err := os.Stat(marker)
+	markerFile, err := os.Open(marker)
 	if err != nil {
 		t.Fatal(err)
+	}
+	before, err := markerFile.Stat()
+	closeErr := markerFile.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
 	}
 	markerData, err := os.ReadFile(marker)
 	if err != nil {
@@ -131,9 +166,17 @@ func TestRuntimeUpgradePreservesOldGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	marker := filepath.Join(old, "version.json")
-	before, err := os.Stat(marker)
+	markerFile, err := os.Open(marker)
 	if err != nil {
 		t.Fatal(err)
+	}
+	before, err := markerFile.Stat()
+	closeErr := markerFile.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
 	}
 	upgraded, nextData := runtimeFixture(t, "new executable")
 	versionOnly := upgraded
@@ -362,7 +405,7 @@ func TestRuntimeLockExcludesAnotherProcessAndKeepsFile(t *testing.T) {
 			releaseRuntimeLock(lock)
 		}
 	}()
-	before, err := os.Stat(path)
+	before, err := lock.Stat()
 	if err != nil {
 		t.Fatal(err)
 	}

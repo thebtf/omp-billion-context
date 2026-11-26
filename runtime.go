@@ -387,12 +387,8 @@ func startEngine(startupCtx, lifetimeCtx context.Context) (engine, error) {
 		node += ".exe"
 	}
 	entry := filepath.Join(runtimeRoot, "node_modules", "billion-context", "dist", "index.js")
-	watchPath := filepath.ToSlash(watch)
-	if runtime.GOOS == "windows" {
-		watchPath = "/" + watchPath
-	}
-	preload := url.URL{Scheme: "file", Path: watchPath}
-	childCtx, cancelChild := context.WithCancel(lifetimeCtx)
+	preload := runtimeFileURL(watch)
+	childCtx, cancelChild := context.WithCancel(context.WithoutCancel(lifetimeCtx))
 	defer func() {
 		if !kept {
 			cancelChild()
@@ -452,6 +448,24 @@ func startEngine(startupCtx, lifetimeCtx context.Context) (engine, error) {
 	}
 	kept = true
 	return engine{url: endpoint, client: client, stop: stop, done: done, token: token}, nil
+}
+
+func runtimeFileURL(path string) url.URL {
+	path = filepath.ToSlash(path)
+	if runtime.GOOS == "windows" {
+		if strings.HasPrefix(path, "//?/") {
+			path = strings.TrimPrefix(path, "//?/")
+			if len(path) >= 4 && strings.EqualFold(path[:4], "UNC/") {
+				path = "//" + path[4:]
+			}
+		}
+		if strings.HasPrefix(path, "//") {
+			host, rest, _ := strings.Cut(path[2:], "/")
+			return url.URL{Scheme: "file", Host: host, Path: "/" + rest}
+		}
+		path = "/" + path
+	}
+	return url.URL{Scheme: "file", Path: path}
 }
 
 func stringPort(addr *net.TCPAddr) string {
