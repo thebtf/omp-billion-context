@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,17 +25,16 @@ func lifecycleAwait(t *testing.T, done <-chan struct{}) {
 	}
 }
 
-func lifecycleRead(t *testing.T, l *nativeLifecycle) managementResponse {
-	t.Helper()
+func lifecycleRead(l *nativeLifecycle) (managementResponse, error) {
 	raw, err := json.Marshal(managementRequest{Method: http.MethodGet, Path: "/v0/management" + webUIRoute, Query: url.Values{"target": {"/__bili/status"}}})
 	if err != nil {
-		t.Fatal(err)
+		return managementResponse{}, err
 	}
 	result, failure := l.handle("management.handle", raw)
 	if failure != nil {
-		t.Fatalf("management read failed: %+v", failure)
+		return managementResponse{}, errors.New(failure.Message)
 	}
-	return result.(managementResponse)
+	return result.(managementResponse), nil
 }
 
 func TestNativeInitializationReplacesOnlyRetiredOwners(t *testing.T) {
@@ -125,11 +125,16 @@ func TestNativeInitializationWaitsForRetiredCleanup(t *testing.T) {
 			t.Cleanup(old.shutdown)
 			t.Cleanup(func() { registry.current.Load().shutdown() })
 			entered, release, retired := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var cleanupFinished atomic.Bool
 			var releaseOnce sync.Once
 			unblock := func() { releaseOnce.Do(func() { close(release) }) }
 			t.Cleanup(unblock)
 			old.generation.startEngine = func(context.Context, context.Context) (engine, error) {
-				return engine{done: make(chan struct{}), stop: func() { close(entered); <-release }}, nil
+				return engine{done: make(chan struct{}), stop: func() {
+					close(entered)
+					<-release
+					cleanupFinished.Store(true)
+				}}, nil
 			}
 			if _, _, err := old.generation.runningEngine(context.Background()); err != nil {
 				t.Fatal(err)
@@ -141,19 +146,29 @@ func TestNativeInitializationWaitsForRetiredCleanup(t *testing.T) {
 				}
 			}()
 			lifecycleAwait(t, entered)
-			started, initialized := make(chan struct{}), make(chan struct{})
+			initialized := make(chan struct{})
 			go func() {
 				defer close(initialized)
-				close(started)
-				if !registry.initialize(nil) {
+				ok := registry.initialize(nil)
+				if !cleanupFinished.Load() {
+					t.Error("initialization returned before old cleanup finished")
+				}
+				if !ok {
 					t.Error("initialization rejected completed retirement")
 				}
 			}()
-			lifecycleAwait(t, started)
-			select {
-			case <-initialized:
-				t.Fatal("initialization overlapped old cleanup")
-			case <-time.After(20 * time.Millisecond):
+			deadline := time.NewTimer(5 * time.Second)
+			defer deadline.Stop()
+			for registry.initialization.TryLock() {
+				registry.initialization.Unlock()
+				select {
+				case <-initialized:
+					t.Fatal("initialization returned before entering cleanup wait")
+				case <-deadline.C:
+					t.Fatal("initialization did not enter cleanup wait")
+				default:
+					runtime.Gosched()
+				}
 			}
 			unblock()
 			lifecycleAwait(t, retired)
@@ -179,12 +194,18 @@ func TestNativeLifecycleReconfigurePreservesTerminalStartupFailure(t *testing.T)
 		starts.Add(1)
 		return engine{}, &engineStartupError{stage: "start", cause: errors.New("fixture failure")}
 	}
-	first := lifecycleRead(t, l)
+	first, err := lifecycleRead(l)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for range 3 {
 		if _, failure := l.handle("plugin.reconfigure", nil); failure != nil {
 			t.Fatal(failure)
 		}
-		next := lifecycleRead(t, l)
+		next, err := lifecycleRead(l)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if next.StatusCode != http.StatusServiceUnavailable || string(next.Body) != string(first.Body) {
 			t.Fatalf("reconfigure changed cached startup failure: %d %s", next.StatusCode, next.Body)
 		}
@@ -213,12 +234,15 @@ func TestNativeLifecycleBusyAdmittedReadFinishesNormally(t *testing.T) {
 	l.generation.startEngine = func(context.Context, context.Context) (engine, error) {
 		return engine{url: *endpoint, client: server.Client(), done: make(chan struct{}), stop: func() { stops.Add(1) }}, nil
 	}
+	type readResult struct {
+		response managementResponse
+		err      error
+	}
+	read := make(chan readResult, 1)
 	go func() {
 		defer close(finished)
-		response := lifecycleRead(t, l)
-		if response.StatusCode != http.StatusOK || string(response.Body) != `{"status":"ready"}` {
-			t.Errorf("admitted read did not finish normally: %d %s", response.StatusCode, response.Body)
-		}
+		response, err := lifecycleRead(l)
+		read <- readResult{response: response, err: err}
 	}()
 	lifecycleAwait(t, entered)
 	if _, failure := l.handle("plugin.quiesce", nil); failure == nil || failure.Code != "plugin_busy" {
@@ -229,6 +253,13 @@ func TestNativeLifecycleBusyAdmittedReadFinishesNormally(t *testing.T) {
 	}
 	unblock()
 	lifecycleAwait(t, finished)
+	result := <-read
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	if result.response.StatusCode != http.StatusOK || string(result.response.Body) != `{"status":"ready"}` {
+		t.Fatalf("admitted read did not finish normally: %d %s", result.response.StatusCode, result.response.Body)
+	}
 	if _, failure := l.handle("plugin.quiesce", nil); failure != nil {
 		t.Fatal(failure)
 	}
@@ -318,7 +349,10 @@ func TestNativeLifecycleBusyOutputCallbackKeepsStreamAlive(t *testing.T) {
 	l.generation.startEngine = func(context.Context, context.Context) (engine, error) {
 		return engine{url: *endpoint, client: server.Client(), done: make(chan struct{}), stop: func() { stops.Add(1) }}, nil
 	}
-	response := lifecycleRead(t, l)
+	response, err := lifecycleRead(l)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if response.StatusCode != http.StatusOK || string(response.Body) != `{"status":"fresh"}` {
 		t.Fatalf("fresh generation did not reach the fixture engine: %d %s", response.StatusCode, response.Body)
 	}
@@ -408,8 +442,13 @@ func TestNativeLifecycleSerializesCleanupResumeAndPermanentShutdown(t *testing.T
 	l := newNativeLifecycle(nil)
 	t.Cleanup(l.shutdown)
 	t.Cleanup(unblock)
+	order := make(chan string, 3)
 	l.generation.startEngine = func(context.Context, context.Context) (engine, error) {
-		return engine{done: make(chan struct{}), stop: func() { close(entered); <-release }}, nil
+		return engine{done: make(chan struct{}), stop: func() {
+			close(entered)
+			<-release
+			order <- "cleanup"
+		}}, nil
 	}
 	if _, _, err := l.generation.runningEngine(context.Background()); err != nil {
 		t.Fatal(err)
@@ -426,23 +465,31 @@ func TestNativeLifecycleSerializesCleanupResumeAndPermanentShutdown(t *testing.T
 		t.Fatalf("cleanup admitted work: %+v", failure)
 	}
 	resumed, closed := make(chan struct{}), make(chan struct{})
+	resumeEntered, shutdownEntered := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(resumed)
+		close(resumeEntered)
 		_, failure := l.handle("plugin.reconfigure", nil)
+		order <- "reconfigure"
 		if failure != nil && failure.Code != "plugin_closed" {
 			t.Error(failure)
 		}
 	}()
-	go func() { defer close(closed); l.shutdown() }()
-	select {
-	case <-resumed:
-		t.Fatal("reconfigure returned before old cleanup finished")
-	case <-time.After(20 * time.Millisecond):
-	}
+	go func() {
+		defer close(closed)
+		close(shutdownEntered)
+		l.shutdown()
+		order <- "shutdown"
+	}()
+	lifecycleAwait(t, resumeEntered)
+	lifecycleAwait(t, shutdownEntered)
 	unblock()
 	lifecycleAwait(t, quiesced)
 	lifecycleAwait(t, resumed)
 	lifecycleAwait(t, closed)
+	if first := <-order; first != "cleanup" {
+		t.Fatalf("%s returned before old cleanup finished", first)
+	}
 	for _, method := range []string{"plugin.reconfigure", "executor.identifier", "plugin.quiesce"} {
 		if _, failure := l.handle(method, nil); failure == nil || failure.Code != "plugin_closed" {
 			t.Fatalf("%s after permanent shutdown = %+v", method, failure)
