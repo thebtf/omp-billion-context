@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta name="color-scheme" content="light dark">
+	<title>Billion Context</title>
+	<style>
+		body {
+			font: 1rem/1.5 system-ui, sans-serif;
+			margin: 0;
+		}
+
+		main {
+			max-width: 32rem;
+			margin: 3rem auto;
+			padding: 0 1rem;
+		}
+
+		label,
+		input {
+			display: block;
+		}
+
+		input,
+		button {
+			font: inherit;
+			padding: .4rem .6rem;
+		}
+
+		input {
+			box-sizing: border-box;
+			width: 100%;
+			margin: .25rem 0 .75rem;
+		}
+	</style>
+</head>
+
+<body>
+	<main>
+		<h1>Billion Context</h1>
+		<p>Use your CPA management key to open the bundled bili WebUI. The key is forgotten when you reload or leave this
+			page.</p>
+		<p>This WebUI is read-only in CPA. Use standalone bili to change configuration, routing, networking, plugins, or
+			versions.</p>
+		<form autocomplete="off">
+			<label for="management-key">CPA management key</label>
+			<input id="management-key" type="password" aria-describedby="status" required>
+			<button type="submit">Open Billion Context</button>
+		</form>
+		<p id="status" role="status"></p>
+		<progress aria-label="Opening the bili WebUI" hidden></progress>
+	</main>
+	<script>
+		(() => {
+			const form = document.querySelector('form');
+			const input = document.getElementById('management-key');
+			const button = form.querySelector('button');
+			const status = document.getElementById('status');
+			const progress = document.querySelector('progress');
+			const nativeFetch = window.fetch.bind(window);
+			const root = '/__bili/';
+			const route = '/v0/management/plugins/omp-billion-context/webui-data';
+			const denied = response => response.status === 401 || response.status === 403;
+
+			function read(target, key, signal) {
+				return nativeFetch(`${route}?${new URLSearchParams({target})}`, {
+					headers: {'X-Management-Key': key}, credentials: 'omit', cache: 'no-store', redirect: 'error', signal,
+				});
+			}
+
+			function blocked(status, error) {
+				return new Response(JSON.stringify({error}), {
+					status, headers: {'Content-Type': 'application/json'},
+				});
+			}
+
+			function showNativeUI(html, key) {
+				window.fetch = async (input, init) => {
+					const request = new Request(input, init);
+					const target = new URL(request.url);
+					if (target.origin !== location.origin || !target.pathname.startsWith(root)) return nativeFetch(request);
+					if (request.method !== 'GET') return blocked(405, 'Use standalone bili to make changes.');
+					if (!key) return blocked(401, 'Reopen Billion Context with your CPA management key.');
+					const response = await read(target.pathname + target.search, key, request.signal);
+					if (denied(response)) {
+						key = '';
+						document.getElementById('cpa-webui-status').textContent = 'CPA no longer accepts this key. Lock the WebUI and enter your current key.';
+					}
+					return response;
+				};
+				// Parse the original document only after fetch is installed so bili's inline scripts use it on startup.
+				document.open();
+				document.write(html);
+				document.close();
+
+				const style = document.createElement('style');
+				style.textContent = `
+					.embed .topbar { display: flex; }
+					.embed [data-nav="blog"] { display: none; }
+					#cpa-webui-notice {
+						display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem;
+						box-sizing: border-box; min-height: 5rem; padding: .5rem 14rem .5rem 1rem;
+						background: var(--bg-muted); border-bottom: 1px solid var(--border);
+					}
+					@media (max-width: 700px) {
+						#cpa-webui-notice { padding: 5rem 1rem .5rem; }
+					}
+				`;
+				document.head.append(style);
+				const notice = document.createElement('aside');
+				notice.id = 'cpa-webui-notice';
+				notice.setAttribute('aria-label', 'CPA WebUI access');
+				notice.innerHTML = `<span>Read-only in CPA. Use standalone bili to change settings or versions, test connections, or open the blog.</span>
+					<button class="btn sm" type="button">Lock WebUI</button><span id="cpa-webui-status" role="status"></span>`;
+				notice.querySelector('button').addEventListener('click', () => {
+					key = '';
+					location.reload();
+				});
+				document.body.prepend(notice);
+				window.addEventListener('pagehide', () => {key = '';}, {once: true});
+				window.addEventListener('pageshow', event => {
+					if (event.persisted) location.reload();
+				});
+			}
+
+			form.addEventListener('submit', async event => {
+				event.preventDefault();
+				if (button.disabled) return;
+				const key = input.value;
+				input.value = '';
+				input.removeAttribute('aria-invalid');
+				button.disabled = true;
+				progress.hidden = false;
+				status.textContent = 'Opening the bili WebUI…';
+				try {
+					const response = await read(root, key, AbortSignal.timeout(35000));
+					if (denied(response)) {
+						input.setAttribute('aria-invalid', 'true');
+						status.textContent = 'CPA rejected the key. Enter your current CPA management key.';
+					} else if (!response.ok || !response.headers.get('Content-Type')?.startsWith('text/html')) {
+						status.textContent = `Could not open the bili WebUI (HTTP ${response.status}). Try again.`;
+					} else {
+						showNativeUI(await response.text(), key);
+						return;
+					}
+				} catch {
+					status.textContent = 'Could not connect to the bili WebUI. Try again.';
+				}
+				progress.hidden = true;
+				button.disabled = false;
+				input.focus();
+			});
+		})();
+	</script>
+</body>
+
+</html>
