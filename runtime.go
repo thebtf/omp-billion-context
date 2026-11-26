@@ -34,7 +34,7 @@ const engineStartupTimeout = 20 * time.Second
 
 var (
 	errEngineExited   = errors.New("bundled billion-context engine exited")
-	errRuntimeStorage = errors.New("cannot locate persistent plugin storage beside the native library")
+	errRuntimeStorage = errors.New("cannot locate persistent CPA plugins storage from the native library path")
 	errRuntimeCorrupt = errors.New("installed runtime is incomplete or corrupt")
 )
 
