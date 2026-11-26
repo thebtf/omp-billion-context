@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { basename, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -17,6 +19,7 @@ const children = [];
 const requests = [];
 const clientKey = 'synthetic-cpa-client';
 const managementKey = 'synthetic-management';
+const localPassword = 'synthetic-cpa-watchdog';
 const upstreamKey = 'synthetic-cpa-provider';
 const model = 'existing-cpa-model';
 const target = 'gpt-5.4';
@@ -70,12 +73,104 @@ async function freePort() {
 function start(executable, args, vars) {
 	const baseline = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(ACP_|BILI_|OMP_BILI_|NODE_OPTIONS$|PATH$|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$)/i.test(key)));
 	const env = { ...baseline, PATH: '', TEMP: scratch, TMP: scratch, TMPDIR: scratch, HOME: scratch, USERPROFILE: scratch, APPDATA: scratch, LOCALAPPDATA: scratch, XDG_CONFIG_HOME: scratch, XDG_DATA_HOME: scratch, XDG_STATE_HOME: scratch, ...vars };
-	const child = spawn(executable, args, { cwd: scratch, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-	const record = { child, log: '', stopped: new Promise(done => child.once('close', done)) };
+	const child = spawn(executable, args, { cwd: join(scratch, 'server-cwd'), env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+	const record = { child, log: '', stopped: new Promise(done => child.once('close', (code, signal) => done({ code, signal }))) };
 	child.on('error', error => { record.log += `${error}\n`; });
 	for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => { record.log = (record.log + chunk).slice(-12000); });
 	children.push(record);
 	return record;
+}
+
+async function runtimeSnapshot(directory, prefix = '') {
+	const files = [];
+	const entries = await readdir(directory, { withFileTypes: true });
+	for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+		const path = join(directory, entry.name);
+		const name = prefix + entry.name;
+		assert(entry.isDirectory() || entry.isFile(), `Unexpected installed runtime entry ${name}`);
+		if (entry.isDirectory()) {
+			files.push({ name: `${name}/` });
+			files.push(...await runtimeSnapshot(path, `${name}/`));
+		} else {
+			const info = await stat(path);
+			const digest = createHash('sha256');
+			for await (const chunk of createReadStream(path)) digest.update(chunk);
+			files.push({ name, ino: info.ino, dev: info.dev, mtime: info.mtimeMs, size: info.size, mode: info.mode, sha256: digest.digest('hex') });
+		}
+	}
+	return files;
+}
+
+async function instanceDirs(dataRoot) {
+	try {
+		return (await readdir(join(dataRoot, 'instances'))).sort();
+	} catch (error) {
+		if (error.code === 'ENOENT') return [];
+		throw error;
+	}
+}
+
+async function startHeartbeat(record, url) {
+	const controller = new AbortController();
+	const heartbeat = { controller, done: undefined, error: undefined };
+	record.heartbeat = heartbeat;
+	async function pulse() {
+		assert(record.child.exitCode === null && record.child.signalCode === null, `CPA exited during keep-alive:\n${record.log}`);
+		const response = await fetch(`${url}/keep-alive`, {
+			headers: { 'X-Local-Password': localPassword },
+			signal: AbortSignal.any([controller.signal, AbortSignal.timeout(2000)]),
+		});
+		assert.equal(response.status, 200, `Keep-alive rejected synthetic credentials: ${await response.text()}`);
+	}
+	for (let attempt = 0; ; attempt++) {
+		try {
+			await pulse();
+			break;
+		} catch (error) {
+			if (error.cause?.code !== 'ECONNREFUSED' || attempt >= 119) throw error;
+			await delay(250, undefined, { signal: controller.signal });
+		}
+	}
+	heartbeat.done = (async () => {
+		try {
+			while (!controller.signal.aborted) {
+				await delay(2000, undefined, { signal: controller.signal });
+				await pulse();
+			}
+		} catch (error) {
+			if (!controller.signal.aborted) heartbeat.error = error;
+		}
+	})();
+}
+
+async function stopHeartbeat(record) {
+	record.heartbeat?.controller.abort();
+	await record.heartbeat?.done;
+}
+
+async function waitForExit(record, milliseconds) {
+	let timeout;
+	try {
+		return await Promise.race([
+			record.stopped,
+			new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error(`CPA shutdown timed out:\n${record.log}`)), milliseconds); }),
+		]);
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+async function stopCPA(record, dataRoot) {
+	await stopHeartbeat(record);
+	if (record.heartbeat.error) throw record.heartbeat.error;
+	assert(record.child.exitCode === null && record.child.signalCode === null, `CPA exited before graceful shutdown:\n${record.log}`);
+	const outcome = await waitForExit(record, 45000);
+	assert.deepEqual(outcome, { code: 0, signal: null }, `CPA must exit successfully after watchdog shutdown:\n${record.log}`);
+	for (let attempt = 0; attempt < 100; attempt++) {
+		if ((await instanceDirs(dataRoot)).length === 0) return;
+		await delay(50);
+	}
+	assert.deepEqual(await instanceDirs(dataRoot), [], 'CPA shutdown must remove its private engine instance');
 }
 
 async function ready(url, record, headers) {
@@ -92,14 +187,17 @@ async function ready(url, record, headers) {
 
 try {
 	const upstreamUrl = `http://127.0.0.1:${await listen(upstream)}`;
-	const pluginDir = join(scratch, 'plugins');
+	const pluginDir = join(scratch, 'custom-native-store');
+	const dataRoot = join(pluginDir, 'omp-billion-context');
 	const cpaPort = await freePort();
 	const cpaUrl = `http://127.0.0.1:${cpaPort}`;
 	const cpaConfig = join(scratch, 'cpa.yaml');
 	await mkdir(pluginDir);
+	await mkdir(join(scratch, 'server-cwd'));
 	await copyFile(pluginPath, join(pluginDir, basename(pluginPath)));
 	await writeFile(cpaConfig, `host: 127.0.0.1\nport: ${cpaPort}\nauth-dir: ${JSON.stringify(join(scratch, 'auth'))}\napi-keys: [${clientKey}, synthetic-other-client]\nrouting:\n  strategy: fill-first\nremote-management:\n  secret-key: ${managementKey}\n  disable-control-panel: true\nplugins:\n  enabled: true\n  dir: ${JSON.stringify(pluginDir)}\n  configs:\n    omp-billion-context:\n      enabled: true\nopenai-compatibility:\n  - name: fake\n    base-url: ${upstreamUrl}/v1\n    api-key-entries:\n      - api-key: ${upstreamKey}\n      - api-key: synthetic-cpa-backup\n    models:\n      - name: ${target}\n        alias: ${model}\n`);
-	const cpa = start(cpaPath, ['-config', cpaConfig, '-local-model'], {});
+	const cpa = start(cpaPath, ['-config', cpaConfig, '-local-model', '-password', localPassword], {});
+	await startHeartbeat(cpa, cpaUrl);
 	const managementHeaders = { 'x-management-key': managementKey };
 	const listing = await ready(`${cpaUrl}/v0/management/plugins`, cpa, managementHeaders);
 	const entry = listing.plugins.find(plugin => plugin.id === 'omp-billion-context');
@@ -144,8 +242,9 @@ try {
 	const write = await bridge(bridgeTarget('/__bili/config'), { method: 'POST', headers: managementHeaders });
 	assert([404, 405].includes(write.status), `Management bridge accepted or misrouted POST (HTTP ${write.status})`);
 	await write.text();
-	const engineDirs = async () => (await readdir(scratch)).filter(name => name.startsWith('omp-billion-context-'));
+	const engineDirs = () => instanceDirs(dataRoot);
 	assert.deepEqual(await engineDirs(), [], 'Reading the shell and making denied requests must not start bili');
+	await assert.rejects(stat(join(dataRoot, 'runtime')), { code: 'ENOENT' });
 
 	const embed = await readWebUI('/__bili/?embed=0');
 	assert.equal(embed.status, 200);
@@ -160,6 +259,18 @@ try {
 	const initialOverview = await readWebUI('/__bili/overview');
 	assert.equal(initialOverview.status, 200, await initialOverview.clone().text());
 	assert.equal((await initialOverview.json()).overview.requests, 0);
+	const runtimeParent = join(dataRoot, 'runtime');
+	const installed = (await readdir(runtimeParent, { withFileTypes: true })).filter(entry => entry.isDirectory());
+	assert.equal(installed.length, 1, 'Cold startup must publish one complete runtime');
+	const runtimeRoot = join(runtimeParent, installed[0].name);
+	const completion = JSON.parse(await readFile(join(runtimeRoot, 'version.json'), 'utf8'));
+	assert.equal(completion.schema, 1);
+	assert.equal(completion.bili_version, '0.1.216');
+	assert.equal(completion.node_version, '24.22.3');
+	assert.equal(installed[0].name, `${completion.bili_version}-${completion.node_version}-${completion.platform}-${completion.archive_sha256}`);
+	const originalRuntime = await runtimeSnapshot(runtimeParent);
+	assert(originalRuntime.some(file => /\/version\.json$/.test(file.name)));
+	assert(originalRuntime.some(file => /\/node(?:\.exe)?$/.test(file.name)));
 	console.log('CPA discovered the Billion Context menu and opened the native bili overview before any model traffic');
 
 	const messages = [{ role: 'user', content: 'Synthetic conversation' }];
@@ -251,7 +362,7 @@ try {
 
 	const engines = await engineDirs();
 	assert.equal(engines.length, 1, 'CPA must start exactly one bundled engine');
-	const engineConfig = JSON.parse(await readFile(join(scratch, engines[0], 'bili.json'), 'utf8'));
+	const engineConfig = JSON.parse(await readFile(join(dataRoot, 'instances', engines[0], 'bili.json'), 'utf8'));
 	const unauthorizedEngine = await fetch(`http://127.0.0.1:${engineConfig.port}/__bili/stats`);
 	assert.equal(unauthorizedEngine.status, 403);
 	await unauthorizedEngine.text();
@@ -298,13 +409,55 @@ try {
 	assert.equal(other.status, 200, otherText);
 	assert(!JSON.stringify(requests.at(-1).body.messages).includes(foldSummary), 'A second CPA client must not inherit the first client’s summary');
 	console.log('Bundled bili folded history; CPA preserved the account, cache key and prefix; caller state stayed isolated');
+	assert.deepEqual(await runtimeSnapshot(runtimeParent), originalRuntime, 'Real requests must not modify the installed runtime');
+	await stopCPA(cpa, dataRoot);
+	assert.deepEqual(await runtimeSnapshot(runtimeParent), originalRuntime, 'Shutdown must retain the immutable runtime and stable lock');
+
+	const [runtimeOS, runtimeArch] = completion.platform.split('-');
+	const platformDir = join(pluginDir, runtimeOS, runtimeArch);
+	await mkdir(platformDir, { recursive: true });
+	await rename(join(pluginDir, basename(pluginPath)), join(platformDir, basename(pluginPath)));
+	const restartConfig = await readFile(cpaConfig, 'utf8');
+	await writeFile(cpaConfig, restartConfig.replace(
+		`  dir: ${JSON.stringify(pluginDir)}\n`,
+		'  dir: "../custom-native-store"\n',
+	));
+	const restarted = start(cpaPath, ['-config', cpaConfig, '-local-model', '-password', localPassword], {});
+	await startHeartbeat(restarted, cpaUrl);
+	const restartedListing = await ready(`${cpaUrl}/v0/management/plugins`, restarted, managementHeaders);
+	assert.equal(restartedListing.plugins.find(plugin => plugin.id === 'omp-billion-context')?.registered, true);
+	assert.deepEqual(await engineDirs(), [], 'Restart must not start an engine before its first supported request');
+	const restartedOverview = await readWebUI('/__bili/overview');
+	assert.equal(restartedOverview.status, 200, await restartedOverview.clone().text());
+	assert.equal((await restartedOverview.json()).overview.requests, 0, 'Conversation state must not persist across CPA restarts');
+	await assert.rejects(stat(join(platformDir, 'omp-billion-context')), { code: 'ENOENT' });
+	const newInstances = await engineDirs();
+	assert.equal(newInstances.length, 1);
+	assert.notEqual(newInstances[0], engines[0], 'Each CPA start needs its own private instance');
+	assert.deepEqual(await runtimeSnapshot(runtimeParent), originalRuntime, 'Restart must reuse the same marker, executable identity, mtimes and content');
+	for (const stream of [false, true]) {
+		const response = await call('chat/completions', { model, messages, stream }, { 'x-acp-session': 'restart-session' });
+		const text = await response.text();
+		assert.equal(response.status, 200, text);
+		assert.match(text, /smoke-ok/);
+		assert(requests.at(-1).body.tools?.length, 'The reused runtime must still compress supported requests');
+	}
+	assert.deepEqual(await runtimeSnapshot(runtimeParent), originalRuntime, 'Warm requests must leave installed runtime files unchanged');
+	await stopCPA(restarted, dataRoot);
+	assert.deepEqual(await engineDirs(), [], 'Both CPA starts must clean their private instances');
+	assert.deepEqual(await runtimeSnapshot(runtimeParent), originalRuntime, 'Only installed runtimes and their stable lock files persist after shutdown');
+	console.log('Root and platform plugin locations reused one plugins-root runtime and removed their separate private instances');
 } catch (error) {
 	for (const { log } of children) if (log) console.error(log);
 	throw error;
 } finally {
-	for (const { child } of children) child.kill();
-	await Promise.all(children.map(({ stopped }) => stopped));
+	await Promise.all(children.map(stopHeartbeat));
+	const cleanup = await Promise.allSettled(children.map(async record => {
+		if (record.child.exitCode === null && record.child.signalCode === null) record.child.kill('SIGKILL');
+		await waitForExit(record, 5000);
+	}));
 	upstream.closeAllConnections();
 	if (upstream.listening) await new Promise(done => upstream.close(done));
 	await rm(scratch, { recursive: true, force: true, maxRetries: 4 });
+	for (const result of cleanup) if (result.status === 'rejected') throw result.reason;
 }

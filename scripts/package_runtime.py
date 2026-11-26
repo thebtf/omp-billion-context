@@ -93,21 +93,46 @@ def main():
         stage = Path(directory)
         node, license_file = stage_node(stage, manifest["engines"]["node"], NODE_DISTRIBUTIONS[host])
         runtime = stage / "runtime.zip"
+        # parse-bmfont-ascii 1.0.6 omits LICENSE.md from its npm tarball.
+        license_path = Path("licenses/parse-bmfont-ascii-1.0.6.txt")
+        files = {
+            node.name: node,
+            license_file.name: license_file,
+            license_path.as_posix(): ROOT / "scripts" / license_path,
+        }
+        for path in sorted(modules.rglob("*")):
+            relative = path.relative_to(modules)
+            if ".bin" in relative.parts or relative.as_posix() == ".package-lock.json":
+                continue
+            if path.is_symlink():
+                raise RuntimeError(f"unexpected symlink in node_modules: {relative}")
+            if path.is_file():
+                files[path.relative_to(ROOT).as_posix()] = path
+        required = [node.name, "NODE-LICENSE", "node_modules/billion-context/package.json", "node_modules/billion-context/dist/index.js"]
         with zipfile.ZipFile(runtime, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.write(node, node.name)
-            archive.write(license_file, license_file.name)
-            # parse-bmfont-ascii 1.0.6 omits LICENSE.md from its npm tarball.
-            license_path = Path("licenses/parse-bmfont-ascii-1.0.6.txt")
-            archive.write(ROOT / "scripts" / license_path, license_path.as_posix())
-            for path in sorted(modules.rglob("*")):
-                relative = path.relative_to(modules)
-                if ".bin" in relative.parts or relative.as_posix() == ".package-lock.json":
-                    continue
-                if path.is_symlink():
-                    raise RuntimeError(f"unexpected symlink in node_modules: {relative}")
-                if path.is_file():
-                    archive.write(path, path.relative_to(ROOT).as_posix())
+            for name, path in sorted(files.items()):
+                entry = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                entry.create_system = 3
+                entry.external_attr = (0o100755 if name == node.name else 0o100644) << 16
+                entry.compress_type = zipfile.ZIP_DEFLATED
+                with path.open("rb") as source, archive.open(entry, "w") as destination:
+                    shutil.copyfileobj(source, destination)
+            sizes = {name: archive.getinfo(name).file_size for name in required}
+        digest = hashlib.sha256()
+        with runtime.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+        metadata = stage / "runtime.json"
+        metadata.write_text(json.dumps({
+            "schema": 1,
+            "bili_version": manifest["dependencies"]["billion-context"],
+            "node_version": manifest["engines"]["node"],
+            "platform": host,
+            "archive_sha256": digest.hexdigest(),
+            "required": sizes,
+        }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
         runtime.replace(bundle / runtime.name)
+        metadata.replace(bundle / metadata.name)
 
 
 if __name__ == "__main__":

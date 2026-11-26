@@ -3,6 +3,7 @@
 /node_modules/
 /bundle/.runtime-*/
 /bundle/runtime.zip
+/bundle/runtime.json
 /*.dll
 /*.so
 /*.dylib

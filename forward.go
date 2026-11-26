@@ -45,15 +45,16 @@ func (p *plugin) execute(req executorRequest) (any, *rpcError) {
 	if path == "" || req.SourceFormat != req.Format || req.Alt != "" || session == "" || !json.Valid(req.Payload) {
 		return nil, &rpcError{Code: "unsupported_request", Message: "request cannot be compressed safely", HTTPStatus: http.StatusBadRequest}
 	}
-	running, relay, err := p.runningEngine()
-	if err != nil {
-		return nil, &rpcError{Code: "engine_unavailable", Message: "could not start bundled billion-context", HTTPStatus: http.StatusServiceUnavailable}
-	}
 	timeout, contentType := nonStreamTimeout, "application/json"
 	if req.Stream {
 		timeout, contentType = streamTimeout, "text/event-stream"
 	}
 	ctx, cancel := context.WithTimeout(p.ctx, timeout)
+	running, relay, err := p.runningEngine(ctx)
+	if err != nil {
+		cancel()
+		return nil, engineFailure(err)
+	}
 	origin, release, err := relay.begin(ctx, req, p.call)
 	if err != nil {
 		cancel()
@@ -120,6 +121,24 @@ func (p *plugin) execute(req executorRequest) (any, *rpcError) {
 		return nil, &rpcError{Code: "sidecar_response", Message: "billion-context returned an invalid or oversized JSON response", HTTPStatus: http.StatusBadGateway}
 	}
 	return executorResponse{Payload: result, Headers: headers}, nil
+}
+
+func engineFailure(err error) *rpcError {
+	failure := &rpcError{Code: "engine_unavailable", Message: "bundled billion-context is unavailable", HTTPStatus: http.StatusServiceUnavailable}
+	var startup *engineStartupError
+	if errors.As(err, &startup) {
+		failure.Message = startup.Error()
+	} else if errors.Is(err, errEngineExited) {
+		failure.Message = errEngineExited.Error()
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		failure.Code = "engine_timeout"
+		failure.HTTPStatus = http.StatusGatewayTimeout
+		if startup == nil {
+			failure.Message = "bundled billion-context startup timed out"
+		}
+	}
+	return failure
 }
 
 func sidecarFailure(err error) *rpcError {

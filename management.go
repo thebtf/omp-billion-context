@@ -150,12 +150,13 @@ func webUITarget(query url.Values) (*url.URL, bool) {
 }
 
 func (p *plugin) readWebUI(target *url.URL) managementResponse {
-	running, _, err := p.runningEngine()
-	if err != nil {
-		return managementError(http.StatusServiceUnavailable, "Could not start bundled billion-context")
-	}
 	ctx, cancel := context.WithTimeout(p.ctx, webUITimeout)
 	defer cancel()
+	running, _, err := p.runningEngine(ctx)
+	if err != nil {
+		failure := engineFailure(err)
+		return managementError(failure.HTTPStatus, failure.Message)
+	}
 	destination := running.url
 	destination.Path, destination.RawQuery = target.Path, target.RawQuery
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, destination.String(), nil)
