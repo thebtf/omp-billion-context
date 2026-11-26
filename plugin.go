@@ -74,65 +74,115 @@ type rpcEnvelope struct {
 
 type hostCall func(method string, payload any, into any) *rpcError
 
+type engineAttempt struct {
+	done   chan struct{}
+	engine engine
+	relay  *modelRelay
+	err    error
+}
+
 type plugin struct {
-	engineMu sync.Mutex
-	engine   engine
-	relay    *modelRelay
-	call     hostCall
-	ctx      context.Context
-	cancel   context.CancelFunc
-	streamMu sync.Mutex
-	streams  sync.WaitGroup
+	engineMu     sync.Mutex
+	attempt      *engineAttempt
+	startEngine  func(startupCtx, lifetimeCtx context.Context) (engine, error)
+	shutdownOnce sync.Once
+	call         hostCall
+	ctx          context.Context
+	cancel       context.CancelFunc
+	streamMu     sync.Mutex
+	streams      sync.WaitGroup
 }
 
 func main() {}
 
 func newPlugin(call hostCall) *plugin {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &plugin{call: call, ctx: ctx, cancel: cancel}
+	return &plugin{call: call, ctx: ctx, cancel: cancel, startEngine: startEngine}
 }
 
-func (p *plugin) runningEngine() (engine, *modelRelay, error) {
+func (p *plugin) runningEngine(ctx context.Context) (engine, *modelRelay, error) {
+	if err := ctx.Err(); err != nil {
+		return engine{}, nil, err
+	}
 	p.engineMu.Lock()
-	defer p.engineMu.Unlock()
+	if err := p.ctx.Err(); err != nil {
+		p.engineMu.Unlock()
+		return engine{}, nil, err
+	}
+	if p.attempt == nil {
+		p.attempt = &engineAttempt{done: make(chan struct{})}
+		go p.runEngineAttempt(p.attempt)
+	}
+	attempt := p.attempt
+	p.engineMu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return engine{}, nil, ctx.Err()
+	case <-p.ctx.Done():
+		return engine{}, nil, p.ctx.Err()
+	case <-attempt.done:
+	}
+	if err := ctx.Err(); err != nil {
+		return engine{}, nil, err
+	}
 	if err := p.ctx.Err(); err != nil {
 		return engine{}, nil, err
 	}
-	if p.relay == nil {
-		relay, err := newModelRelay()
-		if err != nil {
-			return engine{}, nil, err
-		}
-		p.relay = relay
+	if attempt.err != nil {
+		return engine{}, nil, attempt.err
 	}
-	if p.engine.client == nil {
-		started, err := startEngine(p.ctx)
-		if err != nil {
-			return engine{}, nil, err
-		}
-		p.engine = started
+	select {
+	case <-attempt.engine.done:
+		return engine{}, nil, errEngineExited
+	default:
+		return attempt.engine, attempt.relay, nil
 	}
-	return p.engine, p.relay, nil
+}
+
+func (p *plugin) runEngineAttempt(attempt *engineAttempt) {
+	ctx, cancel := context.WithTimeout(p.ctx, engineStartupTimeout)
+	defer cancel()
+	defer close(attempt.done)
+	if err := ctx.Err(); err != nil {
+		attempt.err = err
+		return
+	}
+	relay, err := newModelRelay()
+	if err != nil {
+		attempt.err = &engineStartupError{stage: "relay", cause: err}
+		return
+	}
+	started, err := p.startEngine(ctx, p.ctx)
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		started.close()
+		relay.stop()
+		attempt.err = err
+		return
+	}
+	attempt.engine, attempt.relay = started, relay
 }
 
 func (p *plugin) shutdown() {
-	p.streamMu.Lock()
-	p.cancel()
-	p.streamMu.Unlock()
-	p.streams.Wait()
-	p.engineMu.Lock()
-	defer p.engineMu.Unlock()
-	if p.engine.client != nil {
-		p.engine.client.CloseIdleConnections()
-	}
-	if p.engine.stop != nil {
-		p.engine.stop()
-	}
-	if p.relay != nil {
-		p.relay.stop()
-	}
-	p.engine = engine{}
-	p.relay = nil
+	p.shutdownOnce.Do(func() {
+		p.streamMu.Lock()
+		p.cancel()
+		p.streamMu.Unlock()
+		p.streams.Wait()
+		p.engineMu.Lock()
+		attempt := p.attempt
+		p.engineMu.Unlock()
+		if attempt != nil {
+			<-attempt.done
+			attempt.engine.close()
+			if attempt.relay != nil {
+				attempt.relay.stop()
+			}
+		}
+	})
 }
 
 func (p *plugin) handle(method string, raw []byte) (any, *rpcError) {

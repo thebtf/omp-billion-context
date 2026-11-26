@@ -22,6 +22,8 @@ In CPA Management Center, select **Billion Context** in the sidebar. Enter your 
 
 The WebUI shows read-only **Overview** and **Sessions**, including session details. **Got it** dismisses only the selected notice in the current tab.
 
+The first request starts one bundled engine per plugin instance. Concurrent requests share that startup. Its 20-second deadline includes unpacking, and WebUI reads wait at most 10 seconds. A failed startup or an exited engine stays unavailable until the plugin instance is reinitialized. Canceling a request does not cancel startup. Plugin shutdown cancels startup and stops its engine. CPA can retain old native plugin instances until process shutdown, so this does not change CPA's hot-unload behavior.
+
 ## Supported requests
 
 The plugin handles authenticated HTTP Chat Completions and Responses when the request contains a stable conversation ID. It recognizes standard session headers, `session_id` and `prompt_cache_key`. A request without a usable ID or authenticated CPA caller scope follows the native CPA path. Responses WebSocket, compact, and continuations with opaque provider state, including encrypted reasoning items, stay on the native CPA path. Compression state is isolated by CPA client, model, and protocol, and resets when the plugin stops.
