@@ -18,9 +18,9 @@ No extra model, upstream URL, key, Node.js installation, or background service i
 
 ## Runtime storage
 
-The first supported request installs the bundled Node.js 24.22.3 and billion-context 0.1.216 beside the native plugin library. CPA restarts reuse that installation without reading or extracting the embedded ZIP. No runtime download or separate setup is needed.
+The first supported request installs the bundled Node.js 24.22.3 and billion-context 0.1.216 in CPA's plugins root. CPA restarts reuse that installation without reading or extracting the embedded ZIP. No runtime download or separate setup is needed.
 
-The plugin discovers its own loaded library path. CPA 8.1.4 loads local copies from `<artifact-dir>/.shadow`, so storage is `<artifact-dir>/omp-billion-context`. A library in `/CLIProxyAPI/plugins` uses `/CLIProxyAPI/plugins/omp-billion-context`. A library in `/CLIProxyAPI/plugins/linux/amd64` uses `/CLIProxyAPI/plugins/linux/amd64/omp-billion-context`. Custom plugin directories follow the same rule. Relative library paths resolve against CPA's working directory. The plugin never strips platform directories, assumes a default plugins directory, or derives storage from CPA's executable, config, or home.
+The plugin discovers its own loaded library path. It removes CPA 8.1.4's local `.shadow` component and the current platform's `<os>/<arch>` suffix when present. A library in either `/CLIProxyAPI/plugins` or `/CLIProxyAPI/plugins/linux/amd64` uses `/CLIProxyAPI/plugins/omp-billion-context`. Custom plugin roots follow the same layout. Relative library paths resolve against CPA's working directory. The plugin does not hardcode the Docker path or derive storage from CPA's executable, config, or home.
 
 The storage directory contains:
 
@@ -32,7 +32,7 @@ The package builder emits `bundle/runtime.json` with the versions, platform, ZIP
 
 Old completed versions stay available to native plugin generations that CPA retains. Shutdown removes only the current private instance. Session history is not persistent. `BILI_PERSIST=0` and `logFile=off` remain in effect, with explicit sessions and XDG paths inside the instance. Requests do not write into the installed runtime.
 
-The artifact directory must be writable and backed by persistent storage for installations to survive container replacement. CPA's temporary fallback shadows do not identify the original artifact directory and produce a storage error. A missing or mismatched completion marker, missing required file, or wrong required file size is refused without deleting the installation. Warm checks do not hash every installed file. Interrupted stages and unknown files are left untouched. There is no automatic runtime cleanup policy. A forced process termination can leave its private instance behind.
+The plugins root must be writable and backed by persistent storage for installations to survive container replacement. CPA's temporary fallback shadows do not identify the original artifact directory and produce a storage error. A missing or mismatched completion marker, missing required file, or wrong required file size is refused without deleting the installation. Warm checks do not hash every installed file. Interrupted stages and unknown files are left untouched. There is no automatic runtime cleanup policy. A forced process termination can leave its private instance behind.
 
 ## Billion Context WebUI
 

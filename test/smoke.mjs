@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { basename, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -366,6 +366,10 @@ try {
 	await stopCPA(cpa, dataRoot);
 	assert.deepEqual(await runtimeSnapshot(runtimeParent), originalRuntime, 'Shutdown must retain the immutable runtime and stable lock');
 
+	const [runtimeOS, runtimeArch] = completion.platform.split('-');
+	const platformDir = join(pluginDir, runtimeOS, runtimeArch);
+	await mkdir(platformDir, { recursive: true });
+	await rename(join(pluginDir, basename(pluginPath)), join(platformDir, basename(pluginPath)));
 	const restartConfig = await readFile(cpaConfig, 'utf8');
 	await writeFile(cpaConfig, restartConfig.replace(
 		`  dir: ${JSON.stringify(pluginDir)}\n`,
@@ -378,6 +382,7 @@ try {
 	const restartedOverview = await readWebUI('/__bili/overview');
 	assert.equal(restartedOverview.status, 200, await restartedOverview.clone().text());
 	assert.equal((await restartedOverview.json()).overview.requests, 0, 'Conversation state must not persist across CPA restarts');
+	await assert.rejects(stat(join(platformDir, 'omp-billion-context')), { code: 'ENOENT' });
 	const newInstances = await engineDirs();
 	assert.equal(newInstances.length, 1);
 	assert.notEqual(newInstances[0], engines[0], 'Each CPA start needs its own private instance');
@@ -393,7 +398,7 @@ try {
 	await stopCPA(restarted, dataRoot);
 	assert.deepEqual(await engineDirs(), [], 'Both CPA starts must clean their private instances');
 	assert.deepEqual(await runtimeSnapshot(runtimeParent), originalRuntime, 'Only installed runtimes and their stable lock files persist after shutdown');
-	console.log('Two CPA starts reused the same installed Node/bili runtime and removed their separate private instances');
+	console.log('Root and platform plugin locations reused one plugins-root runtime and removed their separate private instances');
 } catch (error) {
 	for (const { log } of children) if (log) console.error(log);
 	throw error;

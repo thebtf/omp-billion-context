@@ -51,20 +51,30 @@ func runtimeFixture(t *testing.T, nodeContent string) (runtimeManifest, []byte) 
 }
 
 func TestRuntimeDataRootUsesArtifactDirectory(t *testing.T) {
-	artifact := filepath.Join(t.TempDir(), "custom", "linux", "amd64")
-	for _, library := range []string{filepath.Join(artifact, "plugin.so"), filepath.Join(artifact, ".shadow", "cliproxy-plugin-digest.so")} {
-		root, err := runtimeDataRoot(library)
+	plugins := filepath.Join(t.TempDir(), "custom")
+	for _, artifact := range []string{plugins, filepath.Join(plugins, runtime.GOOS, runtime.GOARCH)} {
+		for _, library := range []string{filepath.Join(artifact, "plugin.so"), filepath.Join(artifact, ".shadow", "cliproxy-plugin-digest.so")} {
+			root, err := runtimeDataRoot(library)
+			if err != nil || root != filepath.Join(plugins, pluginID) {
+				t.Fatalf("root for %q = %q, %v", library, root, err)
+			}
+		}
+	}
+	for _, artifact := range []string{filepath.Join(plugins, "not-the-os", runtime.GOARCH), filepath.Join(plugins, runtime.GOOS, "not-the-arch")} {
+		root, err := runtimeDataRoot(filepath.Join(artifact, ".shadow", "plugin.so"))
 		if err != nil || root != filepath.Join(artifact, pluginID) {
-			t.Fatalf("root for %q = %q, %v", library, root, err)
+			t.Fatalf("non-platform root for %q = %q, %v", artifact, root, err)
 		}
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, err := runtimeDataRoot(filepath.Join("plugins", ".shadow", "plugin.so"))
-	if err != nil || root != filepath.Join(cwd, "plugins", pluginID) {
-		t.Fatalf("relative plugin directory = %q, %v", root, err)
+	for _, artifact := range []string{"plugins", filepath.Join("plugins", runtime.GOOS, runtime.GOARCH)} {
+		root, err := runtimeDataRoot(filepath.Join(artifact, ".shadow", "plugin.so"))
+		if err != nil || root != filepath.Join(cwd, "plugins", pluginID) {
+			t.Fatalf("relative plugin directory = %q, %v", root, err)
+		}
 	}
 	for _, library := range []string{"", filepath.Join(os.TempDir(), "cliproxy-pluginhost", "cache", "digest", "plugin.so")} {
 		if _, err := runtimeDataRoot(library); !errors.Is(err, errRuntimeStorage) {

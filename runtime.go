@@ -95,6 +95,9 @@ func runtimeDataRoot(library string) (string, error) {
 	if filepath.Base(directory) == ".shadow" {
 		directory = filepath.Dir(directory)
 	}
+	if filepath.Base(directory) == runtime.GOARCH && filepath.Base(filepath.Dir(directory)) == runtime.GOOS {
+		directory = filepath.Dir(filepath.Dir(directory))
+	}
 	return filepath.Join(directory, pluginID), nil
 }
 
