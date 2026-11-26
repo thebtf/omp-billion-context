@@ -2,13 +2,18 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 )
 
 const pluginID = "omp-billion-context"
+
+//go:embed VERSION
+var pluginVersion string
 
 type protocol string
 
@@ -91,13 +96,17 @@ type plugin struct {
 	cancel       context.CancelFunc
 	streamMu     sync.Mutex
 	streams      sync.WaitGroup
+	streamCount  int
+	streamIdle   chan struct{}
 }
 
 func main() {}
 
 func newPlugin(call hostCall) *plugin {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &plugin{call: call, ctx: ctx, cancel: cancel, startEngine: startEngine}
+	idle := make(chan struct{})
+	close(idle)
+	return &plugin{call: call, ctx: ctx, cancel: cancel, startEngine: startEngine, streamIdle: idle}
 }
 
 func (p *plugin) runningEngine(ctx context.Context) (engine, *modelRelay, error) {
@@ -231,7 +240,7 @@ func registration() any {
 	return map[string]any{
 		"schema_version": 6,
 		"metadata": map[string]string{
-			"Name": pluginID, "Version": "0.2.2", "Author": "thebtf",
+			"Name": pluginID, "Version": strings.TrimSpace(pluginVersion), "Author": "thebtf",
 			"GitHubRepository": "https://github.com/thebtf/omp-billion-context",
 		},
 		"capabilities": map[string]any{

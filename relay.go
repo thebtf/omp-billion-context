@@ -25,12 +25,14 @@ const (
 )
 
 type modelRelay struct {
-	origin string
-	server *http.Server
-	done   chan struct{}
-	mu     sync.Mutex
-	turns  map[string]modelTurn
-	active sync.WaitGroup
+	origin      string
+	server      *http.Server
+	done        chan struct{}
+	mu          sync.Mutex
+	turns       map[string]modelTurn
+	active      sync.WaitGroup
+	activeCount int
+	idle        chan struct{}
 }
 
 type modelTurn struct {
@@ -80,6 +82,8 @@ func newModelRelay() (*modelRelay, error) {
 		done:   make(chan struct{}),
 		turns:  make(map[string]modelTurn),
 	}
+	relay.idle = make(chan struct{})
+	close(relay.idle)
 	relay.server = &http.Server{
 		Handler:           http.HandlerFunc(relay.serveHTTP),
 		ReadHeaderTimeout: 5 * time.Second,
@@ -157,8 +161,20 @@ func (r *modelRelay) serveHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	r.active.Add(1)
+	if r.activeCount == 0 {
+		r.idle = make(chan struct{})
+	}
+	r.activeCount++
 	r.mu.Unlock()
-	defer r.active.Done()
+	defer func() {
+		r.mu.Lock()
+		r.activeCount--
+		if r.activeCount == 0 {
+			close(r.idle)
+		}
+		r.mu.Unlock()
+		r.active.Done()
+	}()
 
 	ctx, cancel := context.WithCancel(req.Context())
 	stopTurn := context.AfterFunc(turn.ctx, cancel)

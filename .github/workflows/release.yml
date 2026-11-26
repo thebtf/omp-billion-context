@@ -51,26 +51,26 @@ jobs:
           CGO_ENABLED: "1"
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
-          EXT: ${{ matrix.ext }}
         run: |
           set -euo pipefail
-          version=0.2.2
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            [[ "$GITHUB_REF_NAME" == "v$version" ]] || exit 1
+            python scripts/release.py check-tag --tag "$GITHUB_REF_NAME"
           fi
           npm ci --omit=dev --ignore-scripts
           python scripts/package_runtime.py --target "$GOOS-$GOARCH"
           go test ./...
-          mkdir -p dist
-          library="omp-billion-context.$EXT"
+          library=$(python scripts/release.py library --target "$GOOS-$GOARCH")
           go build -buildmode=c-shared -o "$library" .
-          python -m zipfile -c "dist/omp-billion-context_${version}_${GOOS}_${GOARCH}.zip" "$library"
-      - name: Verify bundled compression through CPA
+          python scripts/release.py package --target "$GOOS-$GOARCH" --library "$library" --dist dist
+      - name: Verify bundled compression and native replacement through CPA
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           CPA_ASSET: ${{ matrix.cpa_asset }}
           CPA_SHA: ${{ matrix.cpa_sha }}
+          CGO_ENABLED: "1"
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
           EXT: ${{ matrix.ext }}
         run: |
           set -euo pipefail
@@ -84,7 +84,17 @@ jobs:
             tar -xzf ".work/tmp/cpa/$CPA_ASSET" -C .work/tmp/cpa
             cpa=.work/tmp/cpa/cli-proxy-api
           fi
-          node test/smoke.mjs "$cpa" "omp-billion-context.$EXT"
+          library=$(python scripts/release.py library --target "$GOOS-$GOARCH")
+          go build -buildmode=c-shared -ldflags=-buildid=bili007-replacement-fixture -o ".work/tmp/omp-billion-context-replacement.$EXT" .
+          node test/smoke.mjs "$cpa" "$library" ".work/tmp/omp-billion-context-replacement.$EXT"
+      - name: Preserve tested Linux replacement fixture
+        if: matrix.os == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke_fixture_linux_amd64
+          path: .work/tmp/omp-billion-context-replacement.so
+          retention-days: 1
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.os }}-${{ matrix.arch }}
@@ -95,10 +105,45 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
       - uses: actions/download-artifact@v4
         with:
+          name: windows-amd64
           path: dist
-          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-amd64
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: darwin-arm64
+          path: dist
+      - name: Verify release members and rejection paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/release.py verify --dist dist
+          if python scripts/release.py check-tag --tag invalid-tag; then exit 1; fi
+          mkdir -p .work/tmp
+          python - <<'PY'
+          import tempfile
+          import zipfile
+          from pathlib import Path
+          from scripts.release import archive_name, verify_archive, version
+          with tempfile.TemporaryDirectory(dir=".work/tmp") as directory:
+              path = Path(directory) / archive_name(version(), "linux-amd64")
+              with zipfile.ZipFile(path, "w") as archive:
+                  archive.writestr("omp-billion-context.so", b"invalid unversioned member")
+              try:
+                  verify_archive(path, version(), "linux-amd64")
+              except ValueError:
+                  pass
+              else:
+                  raise SystemExit("release verifier accepted an unversioned ZIP member")
+          PY
       - name: Create CPA checksums
         working-directory: dist
         run: sha256sum ./*.zip | sed 's|  \./|  |' > checksums.txt
@@ -115,6 +160,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
       - uses: actions/download-artifact@v4
         with:
           name: cpa-release
@@ -125,12 +174,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          python ../scripts/release.py verify --dist . --tag "$GITHUB_REF_NAME"
           sha256sum --check checksums.txt
-          version=${GITHUB_REF_NAME#v}
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "omp-billion-context $GITHUB_REF_NAME" \
             --notes "Self-contained plugin for CLIProxyAPI 8.1.4. See the repository README for installation and supported requests." \
-            "omp-billion-context_${version}_linux_amd64.zip" \
-            "omp-billion-context_${version}_darwin_arm64.zip" \
-            "omp-billion-context_${version}_windows_amd64.zip" \
-            checksums.txt
+            ./*.zip checksums.txt

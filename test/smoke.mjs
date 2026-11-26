@@ -5,13 +5,18 @@ import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { basename, join, resolve } from 'node:path';
+import { basename, extname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Script } from 'node:vm';
 
 const args = process.argv.slice(2);
-assert.equal(args.length, 2, 'Usage: node test/smoke.mjs <cpa-executable> <plugin-library>');
-const [cpaPath, pluginPath] = args.map(path => resolve(path));
+assert(args.length === 2 || args.length === 3, 'Usage: node test/smoke.mjs <cpa-executable> <plugin-library> [replacement-library]');
+const [cpaPath, pluginPath] = args.slice(0, 2).map(path => resolve(path));
+const replacementPath = args[2] ?? process.env.BILI_TEST_REPLACEMENT_LIBRARY;
+const replacementLibrary = replacementPath ? resolve(replacementPath) : undefined;
+const pluginVersion = (await readFile(new URL('../VERSION', import.meta.url), 'utf8')).trim();
+const [major, minor, patch] = pluginVersion.match(/^([0-9]+)\.([0-9]+)\.([0-9]+)/).slice(1).map(Number);
+const fixtureVersion = offset => `${major}.${minor}.${patch + offset}`;
 const tmp = resolve(process.env.BILI_TEST_TMP ?? '.work/tmp');
 await mkdir(tmp, { recursive: true });
 const scratch = await mkdtemp(join(tmp, 'integration-'));
@@ -76,7 +81,7 @@ function start(executable, args, vars) {
 	const child = spawn(executable, args, { cwd: join(scratch, 'server-cwd'), env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
 	const record = { child, log: '', stopped: new Promise(done => child.once('close', (code, signal) => done({ code, signal }))) };
 	child.on('error', error => { record.log += `${error}\n`; });
-	for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => { record.log = (record.log + chunk).slice(-12000); });
+	for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => { record.log += chunk; });
 	children.push(record);
 	return record;
 }
@@ -194,7 +199,16 @@ try {
 	const cpaConfig = join(scratch, 'cpa.yaml');
 	await mkdir(pluginDir);
 	await mkdir(join(scratch, 'server-cwd'));
-	await copyFile(pluginPath, join(pluginDir, basename(pluginPath)));
+	let activeLibrary = join(pluginDir, `omp-billion-context-v${pluginVersion}${extname(pluginPath)}`);
+	await copyFile(pluginPath, activeLibrary);
+	if (replacementLibrary) {
+		const digest = async path => {
+			const hash = createHash('sha256');
+			for await (const chunk of createReadStream(path)) hash.update(chunk);
+			return hash.digest('hex');
+		};
+		assert.notEqual(await digest(pluginPath), await digest(replacementLibrary), 'Replacement must be a distinct native image built from the same source');
+	}
 	await writeFile(cpaConfig, `host: 127.0.0.1\nport: ${cpaPort}\nauth-dir: ${JSON.stringify(join(scratch, 'auth'))}\napi-keys: [${clientKey}, synthetic-other-client]\nrouting:\n  strategy: fill-first\nremote-management:\n  secret-key: ${managementKey}\n  disable-control-panel: true\nplugins:\n  enabled: true\n  dir: ${JSON.stringify(pluginDir)}\n  configs:\n    omp-billion-context:\n      enabled: true\nopenai-compatibility:\n  - name: fake\n    base-url: ${upstreamUrl}/v1\n    api-key-entries:\n      - api-key: ${upstreamKey}\n      - api-key: synthetic-cpa-backup\n    models:\n      - name: ${target}\n        alias: ${model}\n`);
 	const cpa = start(cpaPath, ['-config', cpaConfig, '-local-model', '-password', localPassword], {});
 	await startHeartbeat(cpa, cpaUrl);
@@ -203,10 +217,15 @@ try {
 	const entry = listing.plugins.find(plugin => plugin.id === 'omp-billion-context');
 	assert.equal(entry?.registered, true, JSON.stringify(listing));
 	assert.equal(entry.effective_enabled, true);
+	assert.equal(entry.id, 'omp-billion-context');
+	assert.equal(resolve(entry.path), activeLibrary, 'CPA must select the canonical versioned library path');
+	assert.equal(basename(entry.path), `omp-billion-context-v${pluginVersion}${extname(pluginPath)}`);
+	assert.equal(entry.metadata?.version, pluginVersion, 'Native metadata must match the canonical release version');
 	const menu = entry.menus.find(item => item.menu === 'Billion Context');
 	assert.equal(menu?.path, '/v0/resource/plugins/omp-billion-context/webui');
 	const shell = await fetch(cpaUrl + menu.path, { signal: AbortSignal.timeout(3000) });
 	assert.equal(shell.status, 200);
+	console.log(JSON.stringify({ library: basename(entry.path), pluginID: entry.id, metadataVersion: entry.metadata.version, registered: entry.registered, effectiveEnabled: entry.effective_enabled, menu: menu.path, uiStatus: shell.status }));
 	assert.match(shell.headers.get('content-type'), /^text\/html\b/);
 	const shellHTML = await shell.text();
 	assert.match(shellHTML, /CPA management key/);
@@ -409,6 +428,152 @@ try {
 	assert.equal(other.status, 200, otherText);
 	assert(!JSON.stringify(requests.at(-1).body.messages).includes(foldSummary), 'A second CPA client must not inherit the first client’s summary');
 	console.log('Bundled bili folded history; CPA preserved the account, cache key and prefix; caller state stayed isolated');
+
+	async function eventually(check, message, milliseconds = 10000) {
+		const deadline = Date.now() + milliseconds;
+		do {
+			if (await check()) return;
+			await delay(50);
+		} while (Date.now() < deadline);
+		assert.fail(`${message}\n${cpa.log}`);
+	}
+	async function reconfigure(priority) {
+		const response = await fetch(`${cpaUrl}/v0/management/plugins/omp-billion-context/config`, {
+			method: 'PUT', headers: { ...managementHeaders, 'content-type': 'application/json' },
+			body: JSON.stringify({ enabled: true, priority }), signal: AbortSignal.timeout(3000),
+		});
+		assert.equal(response.status, 200, await response.text());
+		await eventually(async () => {
+			const listing = await fetch(`${cpaUrl}/v8/management/plugins`, { headers: managementHeaders, signal: AbortSignal.timeout(2000) });
+			assert.equal(listing.status, 200);
+			const plugin = (await listing.json()).plugins.find(item => item.id === 'omp-billion-context');
+			return plugin?.registered && plugin.effective_enabled && plugin.priority === priority;
+		}, `CPA did not finish reconfigure with priority ${priority}`);
+	}
+	async function assertEngineStopped(config, instance) {
+		assert(!(await engineDirs()).includes(instance), 'Quiesce must remove the retired private instance');
+		await assert.rejects(fetch(`http://127.0.0.1:${config.port}/__bili/health`, { signal: AbortSignal.timeout(1000) }), 'Retired engine must no longer listen');
+	}
+	async function coldRecovery(previous) {
+		assert.deepEqual(await engineDirs(), [], 'Completed quiesce must leave recovery lazy');
+		const overview = await readWebUI('/__bili/overview');
+		assert.equal(overview.status, 200, await overview.clone().text());
+		assert.equal((await overview.json()).overview.requests, 0, 'Resumed engine starts with cold process-local state');
+		const instances = await engineDirs();
+		assert.equal(instances.length, 1);
+		assert.notEqual(instances[0], previous, 'Recovery needs a new private generation');
+		const response = await call('chat/completions', { model, stream: true, messages: followup, prompt_cache_key: 'existing-cache-key' }, cycleHeaders);
+		const text = await response.text();
+		assert.equal(response.status, 200, text);
+		assert.match(text, /smoke-ok/);
+		const received = requests.at(-1).body;
+		assert(!JSON.stringify(received.messages).includes(foldSummary), 'A stopped engine does not promise persisted summaries');
+		assert(JSON.stringify(received.messages).includes(`${foldMarker}1 `.repeat(10)), 'Cold recovery must receive the complete client history');
+		assert.deepEqual(cacheFields(received), cacheFields(replay.body));
+		assert.deepEqual(await runtimeSnapshot(runtimeParent), originalRuntime, 'Recovery reuses the immutable shared runtime');
+		return { instance: instances[0], config: JSON.parse(await readFile(join(dataRoot, 'instances', instances[0], 'bili.json'), 'utf8')) };
+	}
+	async function publishLibrary(version, source) {
+		const staged = join(scratch, `replacement-${version}${extname(pluginPath)}`);
+		if (source) await copyFile(source, staged);
+		else await writeFile(staged, 'invalid native library fixture\n');
+		const destination = join(pluginDir, `omp-billion-context-v${version}${extname(pluginPath)}`);
+		await rename(staged, destination);
+		return destination;
+	}
+
+	await reconfigure(11);
+	assert.deepEqual(await engineDirs(), engines, 'Ordinary reconfigure must keep the running engine identity');
+	const preserved = await call('chat/completions', { model, stream: true, messages: followup, prompt_cache_key: 'existing-cache-key' }, cycleHeaders);
+	assert.equal(preserved.status, 200, await preserved.text());
+	assert.equal(JSON.stringify(requests.at(-1).body.messages.slice(0, anchor + 1)), JSON.stringify(replay.body.messages.slice(0, anchor + 1)), 'Ordinary reconfigure must preserve the summary and provider prefix');
+	assert.deepEqual(cacheFields(requests.at(-1).body), cacheFields(replay.body));
+
+	let releaseBusy;
+	streamTail = new Promise(done => { releaseBusy = done; });
+	try {
+		const held = await call('chat/completions', { model, messages, stream: true }, { 'x-acp-session': 'held-replacement-stream' });
+		assert.equal(held.status, 200);
+		const reader = held.body.getReader();
+		const decoder = new TextDecoder();
+		let text = '';
+		while (!text.includes('smoke-ok')) {
+			const chunk = await reader.read();
+			assert(!chunk.done, 'Busy replacement fixture must hold a live stream');
+			text += decoder.decode(chunk.value, { stream: true });
+		}
+		const logStart = cpa.log.length;
+		const invalidBusy = await publishLibrary(fixtureVersion(1));
+		const started = Date.now();
+		await reconfigure(12);
+		await eventually(() => cpa.log.slice(logStart).includes('plugin quiesce failed'), 'Held stream did not refuse replacement');
+		assert(Date.now() - started < 6500, 'CPA must receive bounded busy refusal without canceling the stream');
+		assert(!cpa.log.slice(logStart).includes('failed to load plugin'), 'Busy quiesce must abort before invalid-library loading');
+		assert.deepEqual(await engineDirs(), engines, 'Busy refusal must keep the same private engine');
+		await rm(invalidBusy, { force: true });
+		releaseBusy();
+		for (; ;) {
+			const chunk = await reader.read();
+			if (chunk.done) break;
+			text += decoder.decode(chunk.value, { stream: true });
+		}
+		assert.match(text, /\[DONE\]/, 'The refused replacement must let the original stream finish normally');
+	} finally {
+		releaseBusy?.();
+		streamTail = undefined;
+	}
+	assert.deepEqual(await engineDirs(), engines, 'Busy rollback must not replace the engine after the stream finishes');
+	console.log('Ordinary reconfigure preserved the engine, summary and prefix; held streaming replacement returned busy and finished normally');
+
+	const failureStart = cpa.log.length;
+	const invalid = await publishLibrary(fixtureVersion(2));
+	await reconfigure(13);
+	await eventually(() => cpa.log.slice(failureStart).split('\n').some(line => line.includes('failed to load plugin omp-billion-context from') && line.includes(basename(invalid))), 'Invalid replacement did not fail in the native loader after quiesce');
+	await assertEngineStopped(engineConfig, engines[0]);
+	await rm(invalid, { force: true });
+	const recovered = await coldRecovery(engines[0]);
+	console.log('Invalid-library loading failed after old quiesce; CPA rollback resumed a fresh lazy engine with complete client history');
+
+	if (replacementLibrary) {
+		const reloadStart = cpa.log.length;
+		activeLibrary = await publishLibrary(fixtureVersion(3), replacementLibrary);
+		await reconfigure(14);
+		await eventually(() => cpa.log.slice(reloadStart).split('\n').some(line => line.includes('plugin hot reloaded') && line.includes(basename(activeLibrary))), 'Valid path-changing replacement did not become active');
+		await assertEngineStopped(recovered.config, recovered.instance);
+		await coldRecovery(recovered.instance);
+		console.log('A distinct native image replaced the old path, released its engine and private instance, and reused the shared runtime');
+	} else {
+		console.log('Successful native-image replacement was not exercised; pass a distinct same-source replacement library as the third argument');
+	}
+	async function setEnabled(enabled) {
+		const response = await fetch(`${cpaUrl}/v0/management/plugins/omp-billion-context/enabled`, {
+			method: 'PATCH', headers: { ...managementHeaders, 'content-type': 'application/json' },
+			body: JSON.stringify({ enabled }), signal: AbortSignal.timeout(3000),
+		});
+		assert.equal(response.status, 200, await response.text());
+		let entry;
+		await eventually(async () => {
+			const listing = await fetch(`${cpaUrl}/v8/management/plugins`, { headers: managementHeaders, signal: AbortSignal.timeout(2000) });
+			assert.equal(listing.status, 200);
+			entry = (await listing.json()).plugins.find(item => item.id === 'omp-billion-context');
+			return entry?.enabled === enabled && entry.registered === enabled && entry.effective_enabled === enabled;
+		}, `CPA did not finish setting plugin enabled=${enabled}`);
+		assert.equal(resolve(entry.path), activeLibrary, 'Disable/re-enable must keep the same selected library');
+		return entry;
+	}
+	const beforeDisable = await engineDirs();
+	assert.equal(beforeDisable.length, 1);
+	const disabledConfig = JSON.parse(await readFile(join(dataRoot, 'instances', beforeDisable[0], 'bili.json'), 'utf8'));
+	const disableLogStart = cpa.log.length;
+	await setEnabled(false);
+	await eventually(async () => (await engineDirs()).length === 0 && cpa.log.slice(disableLogStart).split('\n').some(line => line.includes('plugin unloaded') && line.includes(basename(activeLibrary))), 'Disable did not complete native shutdown and cleanup');
+	await assertEngineStopped(disabledConfig, beforeDisable[0]);
+	const reenabled = await setEnabled(true);
+	assert.equal(reenabled.metadata?.version, pluginVersion, 'Reinitialized native metadata must match VERSION');
+	const reopenedShell = await fetch(cpaUrl + menu.path, { signal: AbortSignal.timeout(3000) });
+	assert.equal(reopenedShell.status, 200, await reopenedShell.text());
+	await coldRecovery(beforeDisable[0]);
+	console.log('CPA disabled and re-enabled the same selected native image with a fresh host binding and lazy engine');
 	assert.deepEqual(await runtimeSnapshot(runtimeParent), originalRuntime, 'Real requests must not modify the installed runtime');
 	await stopCPA(cpa, dataRoot);
 	assert.deepEqual(await runtimeSnapshot(runtimeParent), originalRuntime, 'Shutdown must retain the immutable runtime and stable lock');
@@ -416,7 +581,7 @@ try {
 	const [runtimeOS, runtimeArch] = completion.platform.split('-');
 	const platformDir = join(pluginDir, runtimeOS, runtimeArch);
 	await mkdir(platformDir, { recursive: true });
-	await rename(join(pluginDir, basename(pluginPath)), join(platformDir, basename(pluginPath)));
+	await rename(activeLibrary, join(platformDir, basename(activeLibrary)));
 	const restartConfig = await readFile(cpaConfig, 'utf8');
 	await writeFile(cpaConfig, restartConfig.replace(
 		`  dir: ${JSON.stringify(pluginDir)}\n`,
