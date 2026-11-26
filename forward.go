@@ -103,10 +103,22 @@ func (p *plugin) execute(req executorRequest) (any, *rpcError) {
 			return nil, sidecarFailure(context.Canceled)
 		}
 		p.streams.Add(1)
+		if p.streamCount == 0 {
+			p.streamIdle = make(chan struct{})
+		}
+		p.streamCount++
 		p.streamMu.Unlock()
 		detached = true
 		go func() {
-			defer p.streams.Done()
+			defer func() {
+				p.streamMu.Lock()
+				p.streamCount--
+				if p.streamCount == 0 {
+					close(p.streamIdle)
+				}
+				p.streamMu.Unlock()
+				p.streams.Done()
+			}()
 			defer finish()
 			defer response.Body.Close()
 			p.forwardStream(req, response.Body)

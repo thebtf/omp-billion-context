@@ -54,24 +54,21 @@ import "C"
 import (
 	"bytes"
 	"encoding/json"
-	"sync/atomic"
 	"unsafe"
 )
 
 const abiVersion = 1
 
-var native atomic.Pointer[plugin]
+var native nativeRegistry
 
 //export cliproxy_plugin_init
 func cliproxy_plugin_init(host *C.cliproxy_host_api, api *C.cliproxy_plugin_api) C.int {
 	if host == nil || api == nil || host.abi_version != abiVersion || host.call == nil || host.free_buffer == nil {
 		return 1
 	}
-	instance := newPlugin(func(method string, payload any, into any) *rpcError {
+	if !native.initialize(func(method string, payload any, into any) *rpcError {
 		return nativeHostCall(host, method, payload, into)
-	})
-	if !native.CompareAndSwap(nil, instance) {
-		instance.shutdown()
+	}) {
 		return 1
 	}
 	C.set_plugin_api(api, abiVersion)
@@ -84,7 +81,7 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 		return 1
 	}
 	response.ptr, response.len = nil, 0
-	instance := native.Load()
+	instance := native.current.Load()
 	var result any
 	var failure *rpcError
 	switch {
@@ -111,7 +108,7 @@ func cliproxyPluginFree(ptr unsafe.Pointer, _ C.size_t) {
 
 //export cliproxyPluginShutdown
 func cliproxyPluginShutdown() {
-	if instance := native.Swap(nil); instance != nil {
+	if instance := native.current.Load(); instance != nil {
 		instance.shutdown()
 	}
 }
