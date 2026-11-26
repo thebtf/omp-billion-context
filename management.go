@@ -68,7 +68,7 @@ func (p *plugin) handleManagement(raw []byte) managementResponse {
 		return managementError(http.StatusBadRequest, "Invalid management request")
 	}
 	if req.Method != http.MethodGet {
-		return managementError(http.StatusMethodNotAllowed, "Use the standalone bili WebUI to make changes")
+		return managementError(http.StatusMethodNotAllowed, "The CPA WebUI is read-only")
 	}
 	switch req.Path {
 	case "/v0/resource/plugins/" + pluginID + webUIResource:
@@ -85,22 +85,13 @@ func (p *plugin) handleManagement(raw []byte) managementResponse {
 }
 
 var webUIReads = map[string][]string{
-	"overview":        nil,
-	"sessions":        {"page", "pageSize", "q", "protocol", "client", "state"},
-	"session-report":  {"session", "format", "mask", "lang"},
-	"cache-report":    {"session"},
-	"diagnostics":     {"topic"},
-	"stats":           nil,
-	"status":          nil,
-	"config":          nil,
-	"upstream":        nil,
-	"logs":            {"q", "lines", "ctx", "win", "raw", "all"},
-	"pricing":         nil,
-	"resign":          nil,
-	"packs":           nil,
-	"packs/templates": nil,
-	"update/state":    nil,
-	"changelog":       nil,
+	"overview":       nil,
+	"sessions":       {"page", "pageSize", "q", "protocol", "client", "state"},
+	"session-report": {"session", "format", "mask", "lang"},
+	"cache-report":   {"session"},
+	"diagnostics":    {"topic"},
+	"stats":          nil,
+	"status":         nil,
 }
 
 var sessionReads = map[string][]string{
@@ -131,13 +122,8 @@ func webUITarget(query url.Values) (*url.URL, bool) {
 		allowed, ok = []string{"embed", "theme"}, true
 	} else if !ok {
 		parts := strings.Split(name, "/")
-		if len(parts) == 3 {
-			switch {
-			case parts[0] == "sessions" && webUIName.MatchString(parts[1]):
-				allowed, ok = sessionReads[parts[2]]
-			case parts[0] == "packs" && parts[1] == "user" && webUIName.MatchString(parts[2]) && !strings.Contains(parts[2], ".."):
-				ok = true
-			}
+		if len(parts) == 3 && parts[0] == "sessions" && webUIName.MatchString(parts[1]) {
+			allowed, ok = sessionReads[parts[2]]
 		}
 	}
 	if !ok || (len(allowed) == 0 && target.RawQuery != "") {
@@ -187,7 +173,7 @@ func (p *plugin) readWebUI(target *url.URL) managementResponse {
 	mediaType, _, _ := mime.ParseMediaType(contentType)
 	switch {
 	case target.Path == biliWebUIRoot && response.StatusCode == http.StatusOK && mediaType == "text/html":
-	case target.Path != biliWebUIRoot && (mediaType == "application/json" || (target.Path == biliWebUIRoot+"logs" && mediaType == "text/plain")) &&
+	case target.Path != biliWebUIRoot && mediaType == "application/json" &&
 		(response.StatusCode >= 200 && response.StatusCode < 300 || response.StatusCode >= 400 && response.StatusCode < 600):
 	default:
 		return managementError(http.StatusBadGateway, "Unexpected response from bundled billion-context")
@@ -196,13 +182,7 @@ func (p *plugin) readWebUI(target *url.URL) managementResponse {
 	if err != nil || len(body) > webUIReadLimit {
 		return managementError(http.StatusBadGateway, "Bundled billion-context response could not be read in full")
 	}
-	result := newManagementResponse(response.StatusCode, contentType, body)
-	if target.Path == biliWebUIRoot+"logs" {
-		if incomplete := response.Header.Get("X-Bili-Log-Incomplete"); incomplete != "" {
-			result.Headers.Set("X-Bili-Log-Incomplete", incomplete)
-		}
-	}
-	return result
+	return newManagementResponse(response.StatusCode, contentType, body)
 }
 
 func newManagementResponse(status int, contentType string, body []byte) managementResponse {

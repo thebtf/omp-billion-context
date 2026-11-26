@@ -5,6 +5,7 @@ import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node
 import { createServer } from 'node:http';
 import { basename, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { Script } from 'node:vm';
 
 const args = process.argv.slice(2);
 assert.equal(args.length, 2, 'Usage: node test/smoke.mjs <cpa-executable> <plugin-library>');
@@ -111,6 +112,9 @@ try {
 	assert.match(shell.headers.get('content-type'), /^text\/html\b/);
 	const shellHTML = await shell.text();
 	assert.match(shellHTML, /CPA management key/);
+	const script = shellHTML.match(/<script>([\s\S]+?)<\/script>/);
+	assert(script, 'The shipped WebUI shell must include its login script');
+	new Script(script[1], { filename: 'bili-webui.html' });
 	assert(!shellHTML.includes(managementKey));
 	assert(!shellHTML.includes('X-Omp-Bili-Access'));
 
@@ -126,7 +130,8 @@ try {
 	}
 	for (const target of ['https://outside.invalid/__bili/overview', '//outside.invalid/__bili/overview', '/v1/models',
 		'/__bili/overview/extra', '/__bili/../__bili/overview', '/__bili/%6fverview', '/__bili/sessions/a%2Fb/detail',
-		'/__bili/sessions/a\\b/detail', '/__bili/update/install']) {
+		'/__bili/sessions/a\\b/detail', '/__bili/config', '/__bili/pricing', '/__bili/resign', '/__bili/upstream', '/__bili/logs', '/__bili/packs',
+		'/__bili/packs/templates', '/__bili/packs/user/custom', '/__bili/update/state', '/__bili/update/install', '/__bili/changelog']) {
 		const rejected = await readWebUI(target);
 		assert.equal(rejected.status, 400, target);
 		await rejected.text();

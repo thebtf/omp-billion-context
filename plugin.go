@@ -181,7 +181,7 @@ func registration() any {
 	return map[string]any{
 		"schema_version": 6,
 		"metadata": map[string]string{
-			"Name": pluginID, "Version": "0.2.0", "Author": "thebtf",
+			"Name": pluginID, "Version": "0.2.1", "Author": "thebtf",
 			"GitHubRepository": "https://github.com/thebtf/omp-billion-context",
 		},
 		"capabilities": map[string]any{

@@ -18,9 +18,9 @@ No extra model, upstream URL, key, Node.js installation, or background service i
 
 ## Billion Context WebUI
 
-In CPA Management Center, select **Billion Context** in the sidebar. Enter your existing CPA management key to open the bundled bili WebUI. The page keeps the key only in memory until you lock, leave, or reload it.
+In CPA Management Center, select **Billion Context** in the sidebar. Enter your existing CPA management key to open the bundled bili WebUI. The WebUI remembers an accepted key in the current browser tab, including across reloads. Select **Lock WebUI** to clear the key. The WebUI also clears it when CPA rejects it.
 
-The WebUI shows live Overview, Sessions, and diagnostics. Use standalone bili to change settings, routing, networking, plugins, or installed versions, or to open the bili blog.
+The WebUI shows read-only **Overview** and **Sessions**, including session details. **Got it** dismisses only the selected notice in the current tab.
 
 ## Supported requests
 
