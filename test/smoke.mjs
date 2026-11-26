@@ -19,6 +19,7 @@ const children = [];
 const requests = [];
 const clientKey = 'synthetic-cpa-client';
 const managementKey = 'synthetic-management';
+const localPassword = 'synthetic-cpa-watchdog';
 const upstreamKey = 'synthetic-cpa-provider';
 const model = 'existing-cpa-model';
 const target = 'gpt-5.4';
@@ -73,7 +74,7 @@ function start(executable, args, vars) {
 	const baseline = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(ACP_|BILI_|OMP_BILI_|NODE_OPTIONS$|PATH$|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$)/i.test(key)));
 	const env = { ...baseline, PATH: '', TEMP: scratch, TMP: scratch, TMPDIR: scratch, HOME: scratch, USERPROFILE: scratch, APPDATA: scratch, LOCALAPPDATA: scratch, XDG_CONFIG_HOME: scratch, XDG_DATA_HOME: scratch, XDG_STATE_HOME: scratch, ...vars };
 	const child = spawn(executable, args, { cwd: join(scratch, 'server-cwd'), env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-	const record = { child, log: '', stopped: new Promise(done => child.once('close', done)) };
+	const record = { child, log: '', stopped: new Promise(done => child.once('close', (code, signal) => done({ code, signal }))) };
 	child.on('error', error => { record.log += `${error}\n`; });
 	for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => { record.log = (record.log + chunk).slice(-12000); });
 	children.push(record);
@@ -109,17 +110,62 @@ async function instanceDirs(dataRoot) {
 	}
 }
 
-async function stopCPA(record, dataRoot) {
-	record.child.kill();
+async function startHeartbeat(record, url) {
+	const controller = new AbortController();
+	const heartbeat = { controller, done: undefined, error: undefined };
+	record.heartbeat = heartbeat;
+	async function pulse() {
+		assert(record.child.exitCode === null && record.child.signalCode === null, `CPA exited during keep-alive:\n${record.log}`);
+		const response = await fetch(`${url}/keep-alive`, {
+			headers: { 'X-Local-Password': localPassword },
+			signal: AbortSignal.any([controller.signal, AbortSignal.timeout(2000)]),
+		});
+		assert.equal(response.status, 200, `Keep-alive rejected synthetic credentials: ${await response.text()}`);
+	}
+	for (let attempt = 0; ; attempt++) {
+		try {
+			await pulse();
+			break;
+		} catch (error) {
+			if (error.cause?.code !== 'ECONNREFUSED' || attempt >= 119) throw error;
+			await delay(250, undefined, { signal: controller.signal });
+		}
+	}
+	heartbeat.done = (async () => {
+		try {
+			while (!controller.signal.aborted) {
+				await delay(2000, undefined, { signal: controller.signal });
+				await pulse();
+			}
+		} catch (error) {
+			if (!controller.signal.aborted) heartbeat.error = error;
+		}
+	})();
+}
+
+async function stopHeartbeat(record) {
+	record.heartbeat?.controller.abort();
+	await record.heartbeat?.done;
+}
+
+async function waitForExit(record, milliseconds) {
 	let timeout;
 	try {
-		await Promise.race([
+		return await Promise.race([
 			record.stopped,
-			new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('CPA shutdown timed out')), 10000); }),
+			new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error(`CPA shutdown timed out:\n${record.log}`)), milliseconds); }),
 		]);
 	} finally {
 		clearTimeout(timeout);
 	}
+}
+
+async function stopCPA(record, dataRoot) {
+	await stopHeartbeat(record);
+	if (record.heartbeat.error) throw record.heartbeat.error;
+	assert(record.child.exitCode === null && record.child.signalCode === null, `CPA exited before graceful shutdown:\n${record.log}`);
+	const outcome = await waitForExit(record, 45000);
+	assert.deepEqual(outcome, { code: 0, signal: null }, `CPA must exit successfully after watchdog shutdown:\n${record.log}`);
 	for (let attempt = 0; attempt < 100; attempt++) {
 		if ((await instanceDirs(dataRoot)).length === 0) return;
 		await delay(50);
@@ -150,7 +196,8 @@ try {
 	await mkdir(join(scratch, 'server-cwd'));
 	await copyFile(pluginPath, join(pluginDir, basename(pluginPath)));
 	await writeFile(cpaConfig, `host: 127.0.0.1\nport: ${cpaPort}\nauth-dir: ${JSON.stringify(join(scratch, 'auth'))}\napi-keys: [${clientKey}, synthetic-other-client]\nrouting:\n  strategy: fill-first\nremote-management:\n  secret-key: ${managementKey}\n  disable-control-panel: true\nplugins:\n  enabled: true\n  dir: ${JSON.stringify(pluginDir)}\n  configs:\n    omp-billion-context:\n      enabled: true\nopenai-compatibility:\n  - name: fake\n    base-url: ${upstreamUrl}/v1\n    api-key-entries:\n      - api-key: ${upstreamKey}\n      - api-key: synthetic-cpa-backup\n    models:\n      - name: ${target}\n        alias: ${model}\n`);
-	const cpa = start(cpaPath, ['-config', cpaConfig, '-local-model'], {});
+	const cpa = start(cpaPath, ['-config', cpaConfig, '-local-model', '-password', localPassword], {});
+	await startHeartbeat(cpa, cpaUrl);
 	const managementHeaders = { 'x-management-key': managementKey };
 	const listing = await ready(`${cpaUrl}/v0/management/plugins`, cpa, managementHeaders);
 	const entry = listing.plugins.find(plugin => plugin.id === 'omp-billion-context');
@@ -375,7 +422,8 @@ try {
 		`  dir: ${JSON.stringify(pluginDir)}\n`,
 		'  dir: "../custom-native-store"\n',
 	));
-	const restarted = start(cpaPath, ['-config', cpaConfig, '-local-model'], {});
+	const restarted = start(cpaPath, ['-config', cpaConfig, '-local-model', '-password', localPassword], {});
+	await startHeartbeat(restarted, cpaUrl);
 	const restartedListing = await ready(`${cpaUrl}/v0/management/plugins`, restarted, managementHeaders);
 	assert.equal(restartedListing.plugins.find(plugin => plugin.id === 'omp-billion-context')?.registered, true);
 	assert.deepEqual(await engineDirs(), [], 'Restart must not start an engine before its first supported request');
@@ -403,9 +451,13 @@ try {
 	for (const { log } of children) if (log) console.error(log);
 	throw error;
 } finally {
-	for (const { child } of children) child.kill();
-	await Promise.all(children.map(({ stopped }) => stopped));
+	await Promise.all(children.map(stopHeartbeat));
+	const cleanup = await Promise.allSettled(children.map(async record => {
+		if (record.child.exitCode === null && record.child.signalCode === null) record.child.kill('SIGKILL');
+		await waitForExit(record, 5000);
+	}));
 	upstream.closeAllConnections();
 	if (upstream.listening) await new Promise(done => upstream.close(done));
 	await rm(scratch, { recursive: true, force: true, maxRetries: 4 });
+	for (const result of cleanup) if (result.status === 'rejected') throw result.reason;
 }
