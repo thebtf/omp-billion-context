@@ -16,6 +16,12 @@ plugins:
 
 No extra model, upstream URL, key, Node.js installation, or background service is required. Keep sending requests to your existing CPA model with the normal CPA client key. Disable the plugin in CPA to stop compressing new requests.
 
+## Billion Context WebUI
+
+In CPA Management Center, select **Billion Context** in the sidebar. Enter your existing CPA management key to open the bundled bili WebUI. The page keeps the key only in memory until you lock, leave, or reload it.
+
+The WebUI shows live Overview, Sessions, and diagnostics. Use standalone bili to change settings, routing, networking, plugins, or installed versions, or to open the bili blog.
+
 ## Supported requests
 
 The plugin handles authenticated HTTP Chat Completions and Responses when the request contains a stable conversation ID. It recognizes standard session headers, `session_id` and `prompt_cache_key`. A request without a usable ID or authenticated CPA caller scope follows the native CPA path. Responses WebSocket, compact, and continuations with opaque provider state, including encrypted reasoning items, stay on the native CPA path. Compression state is isolated by CPA client, model, and protocol, and resets when the plugin stops.

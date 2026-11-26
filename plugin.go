@@ -139,6 +139,10 @@ func (p *plugin) handle(method string, raw []byte) (any, *rpcError) {
 	switch method {
 	case "plugin.register", "plugin.reconfigure":
 		return registration(), nil
+	case "management.register":
+		return registerManagement(), nil
+	case "management.handle":
+		return p.handleManagement(raw), nil
 	case "plugin.shutdown":
 		p.shutdown()
 		return struct{}{}, nil
@@ -175,13 +179,13 @@ func (p *plugin) handle(method string, raw []byte) (any, *rpcError) {
 func registration() any {
 	formats := []protocol{chat, responses}
 	return map[string]any{
-		"schema_version": 1,
+		"schema_version": 6,
 		"metadata": map[string]string{
-			"Name": pluginID, "Version": "0.1.0", "Author": "thebtf",
+			"Name": pluginID, "Version": "0.2.0", "Author": "thebtf",
 			"GitHubRepository": "https://github.com/thebtf/omp-billion-context",
 		},
 		"capabilities": map[string]any{
-			"model_router": true, "executor": true, "executor_model_scope": "static",
+			"model_router": true, "executor": true, "executor_model_scope": "static", "management_api": true,
 			"executor_input_formats": formats, "executor_output_formats": formats,
 		},
 	}
