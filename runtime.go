@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -31,7 +32,228 @@ var privateRuntime []byte
 
 const engineStartupTimeout = 20 * time.Second
 
-var errEngineExited = errors.New("bundled billion-context engine exited")
+var (
+	errEngineExited   = errors.New("bundled billion-context engine exited")
+	errRuntimeStorage = errors.New("cannot locate persistent plugin storage beside the native library")
+	errRuntimeCorrupt = errors.New("installed runtime is incomplete or corrupt")
+)
+
+type runtimeManifest struct {
+	Schema        int              `json:"schema"`
+	BiliVersion   string           `json:"bili_version"`
+	NodeVersion   string           `json:"node_version"`
+	Platform      string           `json:"platform"`
+	ArchiveSHA256 string           `json:"archive_sha256"`
+	Required      map[string]int64 `json:"required"`
+}
+
+func (m runtimeManifest) identity() string {
+	return m.BiliVersion + "-" + m.NodeVersion + "-" + m.Platform + "-" + m.ArchiveSHA256
+}
+
+func (m runtimeManifest) validate() error {
+	for _, value := range []string{m.BiliVersion, m.NodeVersion, m.Platform} {
+		if value == "" || len(value) > 40 || strings.Trim(value, "abcdefghijklmnopqrstuvwxyz0123456789.-") != "" {
+			return errors.New("invalid bundled runtime identity")
+		}
+	}
+	digest, err := hex.DecodeString(m.ArchiveSHA256)
+	if m.Schema != 1 || err != nil || len(digest) != sha256.Size || strings.ToLower(m.ArchiveSHA256) != m.ArchiveSHA256 || m.Platform != runtime.GOOS+"-"+runtime.GOARCH {
+		return errors.New("invalid bundled runtime manifest")
+	}
+	node := "node"
+	if runtime.GOOS == "windows" {
+		node += ".exe"
+	}
+	for _, name := range []string{node, "node_modules/billion-context/dist/index.js"} {
+		if m.Required[name] <= 0 {
+			return errors.New("bundled runtime manifest omits an executable entry")
+		}
+	}
+	for name, size := range m.Required {
+		if !filepath.IsLocal(filepath.FromSlash(name)) || strings.Contains(name, `\`) || name == "version.json" || size < 0 {
+			return errors.New("invalid required runtime file")
+		}
+	}
+	return nil
+}
+
+func runtimeDataRoot(library string) (string, error) {
+	if library == "" {
+		return "", errRuntimeStorage
+	}
+	library, err := filepath.Abs(library)
+	if err != nil {
+		return "", errors.Join(errRuntimeStorage, err)
+	}
+	fallback := filepath.Join(os.TempDir(), "cliproxy-pluginhost")
+	relative, err := filepath.Rel(fallback, library)
+	if err == nil && filepath.IsLocal(relative) {
+		return "", errRuntimeStorage
+	}
+	directory := filepath.Dir(library)
+	if filepath.Base(directory) == ".shadow" {
+		directory = filepath.Dir(directory)
+	}
+	return filepath.Join(directory, pluginID), nil
+}
+
+func acquireRuntimeLock(ctx context.Context, path string) (*os.File, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		locked, err := tryRuntimeLock(file)
+		if err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		if locked {
+			return file, nil
+		}
+		select {
+		case <-ctx.Done():
+		case <-ticker.C:
+		}
+	}
+}
+
+func releaseRuntimeLock(file *os.File) {
+	unlockRuntime(file)
+	_ = file.Close()
+}
+
+func validateRuntimeFiles(ctx context.Context, root string, manifest runtimeManifest) error {
+	for name, size := range manifest.Required {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		path := root
+		parts := strings.Split(filepath.FromSlash(name), string(filepath.Separator))
+		for index, part := range parts {
+			path = filepath.Join(path, part)
+			info, err := os.Lstat(path)
+			if err != nil {
+				return errors.Join(errRuntimeCorrupt, err)
+			}
+			if index < len(parts)-1 {
+				if !info.IsDir() {
+					return errRuntimeCorrupt
+				}
+			} else if !info.Mode().IsRegular() || info.Size() != size || (name == "node" && info.Mode().Perm()&0o100 == 0) {
+				return errRuntimeCorrupt
+			}
+		}
+	}
+	return ctx.Err()
+}
+
+func installedRuntime(ctx context.Context, root string, manifest runtimeManifest) (bool, error) {
+	info, err := os.Lstat(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.IsDir() {
+		return false, errRuntimeCorrupt
+	}
+	markerPath := filepath.Join(root, "version.json")
+	markerInfo, err := os.Lstat(markerPath)
+	if err != nil || !markerInfo.Mode().IsRegular() || markerInfo.Size() > 1<<20 {
+		return false, errors.Join(errRuntimeCorrupt, err)
+	}
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		return false, errors.Join(errRuntimeCorrupt, err)
+	}
+	var marker runtimeManifest
+	if json.Unmarshal(data, &marker) != nil || marker.Schema != manifest.Schema || marker.BiliVersion != manifest.BiliVersion || marker.NodeVersion != manifest.NodeVersion || marker.Platform != manifest.Platform || marker.ArchiveSHA256 != manifest.ArchiveSHA256 || len(marker.Required) != len(manifest.Required) {
+		return false, errRuntimeCorrupt
+	}
+	for name, size := range manifest.Required {
+		if actual, ok := marker.Required[name]; !ok || actual != size {
+			return false, errRuntimeCorrupt
+		}
+	}
+	if err := validateRuntimeFiles(ctx, root, manifest); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func ensureRuntime(ctx context.Context, dataRoot string, manifest runtimeManifest, readArchive func() ([]byte, error)) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := manifest.validate(); err != nil {
+		return "", err
+	}
+	parent := filepath.Join(dataRoot, "runtime")
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return "", err
+	}
+	lock, err := acquireRuntimeLock(ctx, filepath.Join(parent, manifest.identity()+".lock"))
+	if err != nil {
+		return "", err
+	}
+	defer releaseRuntimeLock(lock)
+	root := filepath.Join(parent, manifest.identity())
+	if ready, err := installedRuntime(ctx, root, manifest); ready || err != nil {
+		return root, err
+	}
+	stage, err := os.MkdirTemp(parent, "."+manifest.identity()+".stage-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(stage)
+	data, err := readArchive()
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.New()
+	if _, err := io.Copy(digest, runtimeReader{ctx: ctx, reader: bytes.NewReader(data)}); err != nil {
+		return "", err
+	}
+	if hex.EncodeToString(digest.Sum(nil)) != manifest.ArchiveSHA256 {
+		return "", zip.ErrChecksum
+	}
+	if err := unpackRuntime(ctx, stage, data); err != nil {
+		return "", err
+	}
+	if err := validateRuntimeFiles(ctx, stage, manifest); err != nil {
+		return "", err
+	}
+	marker, err := json.Marshal(manifest)
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(stage, "version.json"), marker, 0o600); err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+		return "", errors.Join(errRuntimeCorrupt, err)
+	}
+	if err := os.Rename(stage, root); err != nil {
+		return "", err
+	}
+	_, err = installedRuntime(ctx, root, manifest)
+	return root, err
+}
 
 type engineStartupError struct {
 	stage string
@@ -42,6 +264,10 @@ func (e *engineStartupError) Error() string {
 	reason := "runtime unavailable"
 	var errno syscall.Errno
 	switch {
+	case errors.Is(e.cause, errRuntimeStorage):
+		reason = errRuntimeStorage.Error()
+	case errors.Is(e.cause, errRuntimeCorrupt):
+		reason = errRuntimeCorrupt.Error()
 	case errors.Is(e.cause, context.DeadlineExceeded):
 		reason = "startup timed out"
 	case errors.Is(e.cause, context.Canceled):
@@ -85,16 +311,35 @@ func startEngine(startupCtx, lifetimeCtx context.Context) (engine, error) {
 	if err := startupCtx.Err(); err != nil {
 		return engine{}, &engineStartupError{stage: "extract", cause: err}
 	}
-	data, err := bundledRuntime.ReadFile("bundle/runtime.zip")
+	library, err := ownLibraryPath()
+	if err != nil {
+		return engine{}, &engineStartupError{stage: "storage", cause: errors.Join(errRuntimeStorage, err)}
+	}
+	dataRoot, err := runtimeDataRoot(library)
+	if err != nil {
+		return engine{}, &engineStartupError{stage: "storage", cause: err}
+	}
+	data, err := bundledRuntime.ReadFile("bundle/runtime.json")
 	if err != nil {
 		return engine{}, &engineStartupError{stage: "extract", cause: err}
 	}
-	if err := startupCtx.Err(); err != nil {
+	var manifest runtimeManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
 		return engine{}, &engineStartupError{stage: "extract", cause: err}
 	}
-	root, err := os.MkdirTemp("", "omp-billion-context-")
+	runtimeRoot, err := ensureRuntime(startupCtx, dataRoot, manifest, func() ([]byte, error) {
+		return bundledRuntime.ReadFile("bundle/runtime.zip")
+	})
 	if err != nil {
 		return engine{}, &engineStartupError{stage: "extract", cause: err}
+	}
+	instances := filepath.Join(dataRoot, "instances")
+	if err := os.MkdirAll(instances, 0o700); err != nil {
+		return engine{}, &engineStartupError{stage: "start", cause: err}
+	}
+	root, err := os.MkdirTemp(instances, "instance-")
+	if err != nil {
+		return engine{}, &engineStartupError{stage: "start", cause: err}
 	}
 	kept := false
 	defer func() {
@@ -102,9 +347,6 @@ func startEngine(startupCtx, lifetimeCtx context.Context) (engine, error) {
 			_ = os.RemoveAll(root)
 		}
 	}()
-	if err := unpackRuntime(startupCtx, root, data); err != nil {
-		return engine{}, &engineStartupError{stage: "extract", cause: err}
-	}
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		return engine{}, &engineStartupError{stage: "start", cause: err}
@@ -141,7 +383,7 @@ func startEngine(startupCtx, lifetimeCtx context.Context) (engine, error) {
 	if runtime.GOOS == "windows" {
 		node += ".exe"
 	}
-	entry := filepath.Join(root, "node_modules", "billion-context", "dist", "index.js")
+	entry := filepath.Join(runtimeRoot, "node_modules", "billion-context", "dist", "index.js")
 	watchPath := filepath.ToSlash(watch)
 	if runtime.GOOS == "windows" {
 		watchPath = "/" + watchPath
@@ -153,7 +395,7 @@ func startEngine(startupCtx, lifetimeCtx context.Context) (engine, error) {
 			cancelChild()
 		}
 	}()
-	cmd := exec.CommandContext(childCtx, filepath.Join(root, node), "--import", preload.String(), entry, "start", "--config", configPath, "--no-auto-update", "--no-passthrough")
+	cmd := exec.CommandContext(childCtx, filepath.Join(runtimeRoot, node), "--import", preload.String(), entry, "start", "--config", configPath, "--no-auto-update", "--no-passthrough")
 	cmd.Dir = root
 	cmd.Env = append(engineEnv(), "BILI_STRICT_PORT="+stringPort(addr), "BILI_SESSIONS_DIR="+sessionsDir,
 		"XDG_CONFIG_HOME="+stateRoot, "XDG_DATA_HOME="+stateRoot, "XDG_STATE_HOME="+stateRoot, "XDG_CACHE_HOME="+stateRoot,
@@ -263,7 +505,7 @@ func unpackRuntime(ctx context.Context, root string, data []byte) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if !filepath.IsLocal(filepath.FromSlash(file.Name)) || strings.Contains(file.Name, `\`) || !file.Mode().IsRegular() {
+		if !filepath.IsLocal(filepath.FromSlash(file.Name)) || strings.Contains(file.Name, `\`) || file.Name == "version.json" || !file.Mode().IsRegular() {
 			return errors.New("invalid bundled runtime archive entry")
 		}
 		destination := filepath.Join(root, filepath.FromSlash(file.Name))
