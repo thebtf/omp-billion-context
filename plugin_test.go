@@ -60,19 +60,22 @@ func TestCompressionIdentityIsScopedAndCacheKeyIsNotRewritten(t *testing.T) {
 	payload := []byte(`{"messages":[{}],"prompt_cache_key":"original-key"}`)
 	headers := http.Header{"X-Acp-Session": {"same-id"}}
 	metadata := map[string]any{"request_path": paths[chat], "caller_scope": "first"}
-	first := requestSession("model", chat, headers, metadata, payload)
-	if first == "" || first == "same-id" || first != requestSession("model", chat, headers, metadata, payload) {
+	first, _ := requestSession("model", chat, headers, metadata, payload)
+	repeat, _ := requestSession("model", chat, headers, metadata, payload)
+	if first == "" || first == "same-id" || first != repeat {
 		t.Fatal("unstable or exposed session identity")
 	}
 	metadata["caller_scope"] = "second"
-	if other := requestSession("model", chat, headers, metadata, payload); other == "" || other == first {
+	if other, _ := requestSession("model", chat, headers, metadata, payload); other == "" || other == first {
 		t.Fatal("two authenticated callers share a session")
 	}
-	if changed := requestSession("different-model", chat, headers, metadata, payload); changed == requestSession("model", chat, headers, metadata, payload) {
+	changed, _ := requestSession("different-model", chat, headers, metadata, payload)
+	same, _ := requestSession("model", chat, headers, metadata, payload)
+	if changed == same {
 		t.Fatal("models share a session")
 	}
 	headers.Set("X-Session-Id", "conflicting-id")
-	if requestSession("model", chat, headers, metadata, payload) != "" {
+	if _, eligible := requestSession("model", chat, headers, metadata, payload); eligible {
 		t.Fatal("claimed ambiguous session")
 	}
 }

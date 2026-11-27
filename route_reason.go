@@ -140,15 +140,16 @@ func classify(model string, format protocol, headers http.Header, metadata map[s
 	if session == "" {
 		session = body.PromptCacheKey
 	}
-	// Last resort, and only for the Anthropic body shape: that handler strips
-	// custom session headers, so the conversation's own opening turn is the one
-	// stable identity left. Chat Completions keeps requiring an explicit id, so a
-	// caller that sent none is still treated as unscoped and stays uncompressed.
-	if session == "" && format == claude {
+	// No explicit id is not a reason to refuse. bili derives a content
+	// fingerprint identity when a client provides none, and that is what it is
+	// for: refusing here would leave such a caller uncompressed for good. Values
+	// that cannot be a header are skipped the same way, so a broken extra header
+	// cannot sink a request that still has usable content.
+	if session == "" {
 		session = openingTurn(body.Messages)
 	}
 	if session == "" {
-		return missingSessionID, ""
+		return compressible, ""
 	}
 	if !validSession(session) {
 		return unusableSessionID, ""
