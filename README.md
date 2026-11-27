@@ -56,6 +56,14 @@ The plugin handles authenticated HTTP Chat Completions, Responses and Anthropic 
 
 A fold necessarily rewrites part of the prompt. The integration tests observe the provider-side cache key, credential and unchanged prefix across a fold and its next turn. They do not measure a live provider's cache hit rate. CPA's own routing strategy still applies: an actual account switch, expiry or model switch can invalidate a warm cache. Nested model calls may appear as separate traces in LLM Tracing.
 
+### Using server-side bili after omp compaction
+
+If an omp conversation already sends an opaque `compaction` item, run `/handoff` in that conversation when the agent is idle. For example, `/handoff Preserve decisions, rejected alternatives, open tasks, and the latest tool results.` This asks omp's model to write a text handoff from the conversation. When omp replays that text and the recent turns, CPA can route eligible requests through bili again. A short session may report “Nothing to compact”. A handoff costs a model call and can omit details; check the facts you need on the next turn.
+
+For subsequent automatic compactions, start omp with the optional [handoff preset](examples/omp-handoff.yml). From this repository run `omp --config examples/omp-handoff.yml`; from another directory pass the absolute path to the file. The preset replaces the compaction method order for that process with `handoff`, then `remote`, then `soft`. It keeps your thresholds, model, and tools. Starting without the preset restores your configured method order; a handoff already written to a session remains part of it.
+
+The handoff is an omp operation. A **bili fold** occurs when bili replaces older messages with a summary in the request to the provider. Check **Billion Context → Overview** for folds and token savings. The preset does not force a fold, enable compression of deltas, or make unsupported encrypted reasoning eligible. Native compaction can use fewer tokens on short sessions; use the preset where longer conversations benefit from incremental folding.
+
 ## Uncompressed requests
 
 A request that stays on the native CPA path is not an error, but some reasons are fixable by the operator. Those are logged once per ten minutes with the running count: `missing_caller_scope` (CPA did not report an authenticated caller), `missing_session_id`, `ambiguous_session_id`, `unusable_session_id`, and `protected_requires_session_id` (the protected replay lacks an explicit conversation ID). Each names the request that lost compression, so a client that never sends a conversation ID is visible instead of silently uncompressed.

@@ -1,0 +1,2 @@
+compaction:
+  methodOrder: [handoff, remote, soft]
