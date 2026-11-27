@@ -209,21 +209,57 @@ func withReadableTitles(body []byte) []byte {
 	}
 	changed := false
 	for _, row := range rows {
-		for _, field := range []string{"firstBlockHint", "title", "hostTitle"} {
+		fields := []string{"title", "hostTitle", "firstBlockHint"}
+		cleaned := make(map[string]string, len(fields))
+		for _, field := range fields {
 			raw, ok := row[field]
 			if !ok {
 				continue
 			}
 			var value string
-			if json.Unmarshal(raw, &value) != nil || !strings.Contains(value, "<") {
+			if json.Unmarshal(raw, &value) != nil || value == "" {
 				continue
 			}
-			if readable := sessionTitle(value); readable != "" && readable != value {
-				if encoded, err := json.Marshal(readable); err == nil {
-					row[field] = encoded
-					changed = true
-				}
+			readable := sessionTitle(value)
+			if readable == "" {
+				continue
 			}
+			cleaned[field] = readable
+			if readable != value {
+				encoded, err := json.Marshal(readable)
+				if err != nil {
+					continue
+				}
+				row[field] = encoded
+				changed = true
+			}
+		}
+		// The list shows title, then hostTitle, then the hint. A boilerplate
+		// first choice hides a later field that actually names the work.
+		var best string
+		for _, field := range fields {
+			if value := cleaned[field]; value != "" && !isBoilerplate(value) && !isGenericJob(value) {
+				best = value
+				break
+			}
+		}
+		if best == "" {
+			continue
+		}
+		for _, field := range fields {
+			value, ok := cleaned[field]
+			if !ok {
+				continue
+			}
+			if isBoilerplate(value) || isGenericJob(value) {
+				encoded, err := json.Marshal(best)
+				if err != nil {
+					continue
+				}
+				row[field] = encoded
+				changed = true
+			}
+			break
 		}
 	}
 	if !changed {

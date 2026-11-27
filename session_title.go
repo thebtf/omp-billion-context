@@ -9,21 +9,78 @@ import (
 // protocol noise in a session list, so the display drops them and keeps prose.
 var titleTags = []string{"chat", "user", "job", "assistant", "system-reminder", "system"}
 
+// boilerplatePrefixes mark harness scaffolding that says nothing about the
+// conversation. A later turn is a better session title than a date reminder.
+var boilerplatePrefixes = []string{
+	"today:", "current working directory:", "do not repeat this information",
+	"system-reminder", "you are a", "you have ",
+}
+
 const titleLimit = 80
 
-// sessionTitle turns a raw block hint into something readable. It prefers prose
-// inside a conversational wrapper, otherwise strips tags from the whole string.
-func sessionTitle(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
-	}
-	for _, tag := range titleTags {
-		if prose := innerTag(raw, tag); prose != "" {
-			return truncateTitle(prose)
+// sessionTitle turns raw conversation text into something that identifies the
+// session. Boilerplate is used only when nothing better exists.
+func sessionTitle(raws ...string) string {
+	title, _ := pickTitle(raws...)
+	return title
+}
+
+// pickTitle returns the best readable title and whether every candidate was
+// boilerplate. Callers use the flag to decide if another field is worth trying.
+// A job description is deferred: background jobs would otherwise all share the
+// same title while a user turn names the actual work.
+func pickTitle(raws ...string) (string, bool) {
+	var fallback string
+	for _, raw := range raws {
+		for _, text := range turnTexts(raw) {
+			if isBoilerplate(text) {
+				if fallback == "" {
+					fallback = text
+				}
+				continue
+			}
+			if strings.HasPrefix(text, "background ") {
+				if fallback == "" {
+					fallback = text
+				}
+				continue
+			}
+			return truncateTitle(text), false
 		}
 	}
-	return truncateTitle(stripTags(raw))
+	return truncateTitle(fallback), fallback != ""
+}
+
+// turnTexts returns every readable segment of one raw field, in order.
+func turnTexts(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var texts []string
+	for _, tag := range titleTags {
+		if prose := innerTag(raw, tag); prose != "" {
+			texts = append(texts, prose)
+		}
+	}
+	if cleaned := stripTags(raw); cleaned != "" {
+		texts = append(texts, cleaned)
+	}
+	return texts
+}
+
+func isGenericJob(text string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(text)), "background ")
+}
+
+func isBoilerplate(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	for _, prefix := range boilerplatePrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // innerTag returns the text inside the first <tag> element, ignoring a closing

@@ -61,8 +61,13 @@ func TestWithReadableTitlesRewritesOnlyDisplayStrings(t *testing.T) {
 	if row["id"] != "abc" || row["live"] != true || row["requests"] != float64(9) {
 		t.Fatalf("non-display fields changed: %v", row)
 	}
-	if row["firstBlockHint"] != "FULFaccept5ae09ecdaf: inspect the card" || row["title"] != "Background subagent" {
-		t.Fatalf("titles = %v / %v", row["firstBlockHint"], row["title"])
+	// A generic job title says nothing, so the real turn wins; the hint loses
+	// only its markup.
+	if row["title"] != "FULFaccept5ae09ecdaf: inspect the card" {
+		t.Fatalf("title = %v, want the informative turn", row["title"])
+	}
+	if row["firstBlockHint"] != "FULFaccept5ae09ecdaf: inspect the card" {
+		t.Fatalf("firstBlockHint = %v", row["firstBlockHint"])
 	}
 }
 
