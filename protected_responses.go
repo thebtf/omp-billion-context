@@ -22,11 +22,25 @@ func protectedInput(input json.RawMessage) (protectedGroups, bool) {
 	if len(input) == 0 || input[0] != '[' {
 		return nil, true
 	}
-	var items []replayItem
-	dec := json.NewDecoder(bytes.NewReader(input))
-	dec.UseNumber()
-	if dec.Decode(&items) != nil {
+	var raws []json.RawMessage
+	if json.Unmarshal(input, &raws) != nil {
 		return nil, false
+	}
+	items := make([]replayItem, len(raws))
+	for i, raw := range raws {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		value, ok := readReplayValue(dec)
+		obj, isObject := value.(map[string]any)
+		if !ok || !isObject {
+			return nil, false
+		}
+		for key := range obj {
+			if key != strings.ToLower(key) {
+				return nil, false
+			}
+		}
+		items[i] = obj
 	}
 	var groups protectedGroups
 	ids := map[string]bool{}
@@ -74,6 +88,52 @@ func protectedInput(input json.RawMessage) (protectedGroups, bool) {
 		}
 	}
 	return groups, true
+}
+
+// Decode opaque items without collapsing duplicate keys, including keys inside
+// arrays such as reasoning summaries and structured tool output.
+func readReplayValue(d *json.Decoder) (any, bool) {
+	token, err := d.Token()
+	if err != nil {
+		return nil, false
+	}
+	switch token {
+	case json.Delim('{'):
+		obj := map[string]any{}
+		seen := map[string]bool{}
+		for d.More() {
+			t, err := d.Token()
+			key, ok := t.(string)
+			if err != nil || !ok {
+				return nil, false
+			}
+			folded := strings.ToLower(key)
+			if seen[folded] {
+				return nil, false
+			}
+			seen[folded] = true
+			value, ok := readReplayValue(d)
+			if !ok {
+				return nil, false
+			}
+			obj[key] = value
+		}
+		end, err := d.Token()
+		return obj, err == nil && end == json.Delim('}')
+	case json.Delim('['):
+		list := []any{}
+		for d.More() {
+			value, ok := readReplayValue(d)
+			if !ok {
+				return nil, false
+			}
+			list = append(list, value)
+		}
+		end, err := d.Token()
+		return list, err == nil && end == json.Delim(']')
+	default:
+		return token, true
+	}
 }
 
 // Go's struct decoder matches keys case-insensitively and accepts duplicates.

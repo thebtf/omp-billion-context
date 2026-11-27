@@ -62,7 +62,7 @@ func TestAmbiguousReasoningModeNeverEntersProtectedReplay(t *testing.T) {
 	if len(groups) != 1 {
 		t.Fatal("control not admitted")
 	}
-	for _, pair := range [][2]string{{`"context":"current_turn"`, `"Context":"current_turn"`}, {`"context":"current_turn"`, `"context":"all_turns","Context":"current_turn"`}, {`"context":"current_turn"`, `"context":"all_turns","context":"current_turn"`}, {`"reasoning":`, `"Reasoning":`}} {
+	for _, pair := range [][2]string{{`"context":"current_turn"`, `"Context":"current_turn"`}, {`"context":"current_turn"`, `"context":"all_turns","Context":"current_turn"`}, {`"context":"current_turn"`, `"context":"all_turns","context":"current_turn"`}, {`"reasoning":`, `"Reasoning":`}, {`"encrypted_content":"opaque"`, `"encrypted_content":"different","encrypted_content":"opaque"`}, {`"call_id":"call_1"`, `"call_id":"other","call_id":"call_1"`}, {`"summary":[]`, `"summary":[{"text":"one","text":"two"}]`}} {
 		wire := []byte(strings.Replace(protectedFixture, pair[0], pair[1], 1))
 		reason, _, _ := classify("m", responses, h, meta, wire)
 		if reason == compressible || groups.intact(wire) {
