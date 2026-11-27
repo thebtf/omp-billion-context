@@ -20,11 +20,13 @@ type protocol string
 const (
 	chat      protocol = "openai"
 	responses protocol = "openai-response"
+	claude    protocol = "claude"
 )
 
 var paths = map[protocol]string{
 	chat:      "/v1/chat/completions",
 	responses: "/v1/responses",
+	claude:    "/v1/messages",
 }
 
 type routeRequest struct {
@@ -216,7 +218,7 @@ func (p *plugin) handle(method string, raw []byte) (any, *rpcError) {
 			reason, _ = classify(req.RequestedModel, req.SourceFormat, req.Headers, req.Metadata, req.Body)
 		}
 		if reason != compressible {
-			p.reportSkip(reason, req.RequestedModel)
+			p.reportSkip(reason, req.SourceFormat, req.RequestedModel)
 			return routeResponse{}, nil
 		}
 		return routeResponse{Handled: true, TargetKind: "self"}, nil
@@ -238,7 +240,7 @@ func (p *plugin) handle(method string, raw []byte) (any, *rpcError) {
 }
 
 func registration() any {
-	formats := []protocol{chat, responses}
+	formats := []protocol{chat, responses, claude}
 	return map[string]any{
 		"schema_version": 6,
 		"metadata": map[string]string{

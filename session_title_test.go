@@ -82,17 +82,17 @@ func TestWithReadableTitlesPassesUnrecognizedPayloadThrough(t *testing.T) {
 func TestSkipReportAnnouncesOncePerInterval(t *testing.T) {
 	var report skipReport
 	start := time.Unix(0, 0)
-	if count, announce := report.record(missingCallerScope, start); !announce || count != 1 {
+	if count, announce := report.record(missingCallerScope, chat, start); !announce || count != 1 {
 		t.Fatalf("first record = (%d, %v)", count, announce)
 	}
-	if _, announce := report.record(missingCallerScope, start.Add(time.Minute)); announce {
+	if _, announce := report.record(missingCallerScope, chat, start.Add(time.Minute)); announce {
 		t.Fatal("repeat inside the interval must stay quiet")
 	}
-	count, announce := report.record(missingCallerScope, start.Add(skipNoticeInterval+time.Second))
+	count, announce := report.record(missingCallerScope, chat, start.Add(skipNoticeInterval+time.Second))
 	if !announce || count != 3 {
 		t.Fatalf("third record = (%d, %v)", count, announce)
 	}
-	counts, total := report.snapshot()
+	counts, total, _ := report.detail()
 	if counts["missing_caller_scope"] != 3 || total != 3 {
 		t.Fatalf("snapshot = %v total=%d", counts, total)
 	}
@@ -101,9 +101,9 @@ func TestSkipReportAnnouncesOncePerInterval(t *testing.T) {
 func TestSkipReportExcludesOrdinaryTrafficFromTheWarningTotal(t *testing.T) {
 	var report skipReport
 	now := time.Unix(0, 0)
-	report.record(otherEndpoint, now)
-	report.record(missingSessionID, now)
-	counts, total := report.snapshot()
+	report.record(otherEndpoint, chat, now)
+	report.record(missingSessionID, chat, now)
+	counts, total, _ := report.detail()
 	if counts["other_endpoint"] != 1 || counts["missing_session_id"] != 1 {
 		t.Fatalf("counts = %v", counts)
 	}
