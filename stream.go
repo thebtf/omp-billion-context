@@ -36,8 +36,10 @@ func (p *plugin) forwardStream(req executorRequest, body io.Reader) {
 			return
 		}
 		if req.Format == chat && bytes.Equal(frame.data, []byte("[DONE]")) {
-			complete = true
-			return // CPA writes the Chat Completions terminal sentinel.
+			// CPA writes the Chat Completions terminal sentinel, so reading
+			// must stop here even if the upstream keeps the body open.
+			finished, complete = true, true
+			return
 		}
 		if !json.Valid(frame.data) {
 			closeMessage.Error = "invalid billion-context stream event"

@@ -349,14 +349,23 @@ try {
 
 	// DSH reaches CPA over the Anthropic endpoint. Without this path the plugin
 	// never sees the request and the provider rejects an oversized history.
+	// call() already sends X-Acp-Session, so no second identifier is added:
+	// two different values would make the request ambiguous and skip bili.
+	const claudeSession = 'smoke-claude';
+	const biliRequests = async () => {
+		const response = await readWebUI('/__bili/overview');
+		assert.equal(response.status, 200);
+		return (await response.json()).overview.requests;
+	};
 	for (const stream of [false, true]) {
 		let release;
 		if (stream) streamTail = new Promise(done => { release = done; });
+		const before = await biliRequests();
 		try {
 			const result = await call('messages', {
 				model, max_tokens: 128, system: 'smoke system prompt', stream,
 				messages: [{ role: 'user', content: 'Synthetic conversation' }],
-			}, { 'x-claude-code-session-id': 'smoke-claude' });
+			}, { 'x-acp-session': claudeSession });
 			assert.equal(result.status, 200);
 			if (stream) {
 				assert.match(result.headers.get('content-type'), /text\/event-stream/);
@@ -378,6 +387,7 @@ try {
 			release?.();
 			streamTail = undefined;
 		}
+		assert((await biliRequests()) > before, 'The Anthropic request must be counted by bili, not bypass it');
 		const received = requests.at(-1);
 		assert.equal(received.body.model, target);
 		assert.equal(received.auth, account);

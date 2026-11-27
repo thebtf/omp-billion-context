@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 // DSH reaches CPA over the Anthropic endpoint, so /v1/messages must be routed
@@ -45,6 +47,52 @@ func TestClaudeRejectsAnEmptyConversation(t *testing.T) {
 	if got, _ := classify("model", claude, headers, metadata, []byte(`{"model":"m","messages":[]}`)); got != emptyConversation {
 		t.Fatalf("classify = %q", got)
 	}
+}
+
+func TestChatSentinelEndsReadingWithoutWaitingForEOF(t *testing.T) {
+	// The upstream keeps the body open after [DONE]; reading must still stop,
+	// otherwise CPA waits for the 15-minute stream timeout.
+	reader := io.MultiReader(
+		strings.NewReader("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"),
+		blockingReader{},
+	)
+	emitted := 0
+	var closed *string
+	p := newPlugin(func(method string, value any, _ any) *rpcError {
+		switch method {
+		case "host.stream.emit":
+			emitted++
+		case "host.stream.close":
+			err := value.(streamClose).Error
+			closed = &err
+		}
+		return nil
+	})
+	t.Cleanup(p.shutdown)
+	done := make(chan struct{})
+	go func() {
+		p.forwardStream(executorRequest{Format: chat, StreamID: "s"}, reader)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("forwardStream kept reading after the terminal sentinel")
+	}
+	if emitted != 1 {
+		t.Fatalf("emitted %d frames, want the single delta", emitted)
+	}
+	if closed == nil || *closed != "" {
+		t.Fatalf("a sentinel-terminated stream must close cleanly, got %v", closed)
+	}
+}
+
+// blockingReader never returns, standing in for an upstream that keeps the
+// response body open after its terminal event.
+type blockingReader struct{}
+
+func (blockingReader) Read([]byte) (int, error) {
+	select {}
 }
 
 func TestClaudeStreamsFramesWithAnEventLine(t *testing.T) {
