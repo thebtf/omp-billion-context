@@ -64,6 +64,8 @@ The same counters are available without log access. `/v0/management/plugins/omp-
 
 Session rows show the text a conversation starts with, so a wrapper tag such as `<system-reminder>` or `<job>` would otherwise become the title. The read-only bridge rewrites only those display strings and leaves identifiers, counters and unknown fields byte-identical.
 
+Two limits come from bili itself and stay there. The message list inside a block renders `messagePreview`, which deliberately flattens whitespace to fit a 110-character row; the expanded text behind the one/full buttons is served as escaped `<pre>` and keeps its line breaks. Provider continuation snapshots are capped at 2 MiB by `BLOCK_CONTENT_MAX_BYTES`. We do not patch either, because a second renderer in the plugin would diverge from bili's own UI.
+
 ## Build and test
 
 On the target platform, install Go, a C compiler, Node.js and Python. Run `npm ci --omit=dev --ignore-scripts` and `python scripts/package_runtime.py`. Use `python scripts/release.py library --target <os>-<arch>` to get the canonical versioned library filename, then build with CGO enabled and `go build -buildmode=c-shared -o <plugin-library> .`. Supported targets are `linux-amd64`, `darwin-arm64`, and `windows-amd64`.
