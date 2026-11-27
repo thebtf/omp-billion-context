@@ -346,6 +346,43 @@ try {
 		}
 	}
 	assert(requests.some(({ body }) => body.tools?.some(tool => ['acp_status', 'compress', 'acp_compress'].includes(tool.function?.name ?? tool.name))), 'The real billion-context process should inject context management tools');
+
+	// DSH reaches CPA over the Anthropic endpoint. Without this path the plugin
+	// never sees the request and the provider rejects an oversized history.
+	for (const stream of [false, true]) {
+		let release;
+		if (stream) streamTail = new Promise(done => { release = done; });
+		try {
+			const result = await call('messages', {
+				model, max_tokens: 128, system: 'smoke system prompt', stream,
+				messages: [{ role: 'user', content: 'Synthetic conversation' }],
+			}, { 'x-claude-code-session-id': 'smoke-claude' });
+			assert.equal(result.status, 200);
+			if (stream) {
+				assert.match(result.headers.get('content-type'), /text\/event-stream/);
+				const reader = result.body.getReader();
+				const decoder = new TextDecoder();
+				let prefix = '';
+				while (!prefix.includes('smoke-ok')) {
+					const chunk = await reader.read();
+					assert(!chunk.done, 'The first Anthropic text must arrive before the provider finishes.');
+					prefix += decoder.decode(chunk.value, { stream: true });
+				}
+				assert.match(prefix, /event: content_block_delta/, 'Anthropic frames need their event line');
+				release();
+				while (!(await reader.read()).done) { }
+			} else {
+				assert.match(await result.text(), /smoke-ok/);
+			}
+		} finally {
+			release?.();
+			streamTail = undefined;
+		}
+		const received = requests.at(-1);
+		assert.equal(received.body.model, target);
+		assert.equal(received.auth, account);
+		console.log(`messages, ${stream ? 'streaming' : 'JSON'}: CPA routed the Anthropic endpoint through bili`);
+	}
 	const opaque = await call('responses', { model, input: [{ type: 'reasoning', encrypted_content: 'opaque-fixture', summary: [] }, ...messages] });
 	const opaqueBody = await opaque.text();
 	assert.equal(opaque.status, 200, opaqueBody);

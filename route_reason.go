@@ -39,6 +39,9 @@ var silentReasons = map[skipReason]bool{
 var sessionHeaders = []string{
 	"X-Acp-Session", "X-Session-Id", "Session-Id", "Session_Id",
 	"X-Claude-Code-Session-Id", "X-Opencode-Session-Id",
+	// Harnesses that speak the Anthropic API name their conversation
+	// differently; without these a /v1/messages caller is never compressed.
+	"Agent-Session-Id", "X-Conversation-Id", "X-Opencode-Session",
 }
 
 // classify is the single eligibility rule shared by routing and execution. It
@@ -73,6 +76,11 @@ func classify(model string, format protocol, headers http.Header, metadata map[s
 		return invalidPayload, ""
 	}
 	if format == chat && len(body.Messages) == 0 {
+		return emptyConversation, ""
+	}
+	// Anthropic calls carry the system prompt outside messages, so the same
+	// "is there a conversation" test applies to a non-empty messages array.
+	if format == claude && len(body.Messages) == 0 {
 		return emptyConversation, ""
 	}
 	if format == responses {
