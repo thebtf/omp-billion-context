@@ -209,58 +209,7 @@ func withReadableTitles(body []byte) []byte {
 	}
 	changed := false
 	for _, row := range rows {
-		fields := []string{"title", "hostTitle", "firstBlockHint"}
-		cleaned := make(map[string]string, len(fields))
-		for _, field := range fields {
-			raw, ok := row[field]
-			if !ok {
-				continue
-			}
-			var value string
-			if json.Unmarshal(raw, &value) != nil || value == "" {
-				continue
-			}
-			readable := sessionTitle(value)
-			if readable == "" {
-				continue
-			}
-			cleaned[field] = readable
-			if readable != value {
-				encoded, err := json.Marshal(readable)
-				if err != nil {
-					continue
-				}
-				row[field] = encoded
-				changed = true
-			}
-		}
-		// The list shows title, then hostTitle, then the hint. A boilerplate
-		// first choice hides a later field that actually names the work.
-		var best string
-		for _, field := range fields {
-			if value := cleaned[field]; value != "" && !isBoilerplate(value) && !isGenericJob(value) {
-				best = value
-				break
-			}
-		}
-		if best == "" {
-			continue
-		}
-		for _, field := range fields {
-			value, ok := cleaned[field]
-			if !ok {
-				continue
-			}
-			if isBoilerplate(value) || isGenericJob(value) {
-				encoded, err := json.Marshal(best)
-				if err != nil {
-					continue
-				}
-				row[field] = encoded
-				changed = true
-			}
-			break
-		}
+		changed = readableRow(row) || changed
 	}
 	if !changed {
 		return body
@@ -277,6 +226,77 @@ func withReadableTitles(body []byte) []byte {
 	return merged
 }
 
+// readableRow rewrites the display strings of one session row in place and
+// reports whether anything changed.
+func readableRow(row map[string]json.RawMessage) bool {
+	fields := []string{"title", "hostTitle", "firstBlockHint"}
+	cleaned := make(map[string]string, len(fields))
+	empty := make(map[string]bool, len(fields))
+	changed := false
+	for _, field := range fields {
+		raw, ok := row[field]
+		if !ok {
+			continue
+		}
+		var value string
+		if json.Unmarshal(raw, &value) != nil || value == "" {
+			continue
+		}
+		readable := sessionTitle(value)
+		if readable == "" {
+			// A field that was nothing but wrapper tags must not keep them;
+			// clearing it lets an informative sibling name the row.
+			empty[field] = true
+			if encoded, err := json.Marshal(""); err == nil {
+				row[field] = encoded
+				changed = true
+			}
+			continue
+		}
+		cleaned[field] = readable
+		if readable == value {
+			continue
+		}
+		if encoded, err := json.Marshal(readable); err == nil {
+			row[field] = encoded
+			changed = true
+		}
+	}
+	// The list shows title, then hostTitle, then the hint. A boilerplate first
+	// choice hides a later field that actually names the work.
+	var best string
+	for _, field := range fields {
+		if value := cleaned[field]; value != "" && !isBoilerplate(value) && !isGenericJob(value) {
+			best = value
+			break
+		}
+	}
+	if best == "" {
+		return changed
+	}
+	for _, field := range fields {
+		if empty[field] {
+			if encoded, err := json.Marshal(best); err == nil {
+				row[field] = encoded
+				changed = true
+			}
+			continue
+		}
+		value, ok := cleaned[field]
+		if !ok {
+			continue
+		}
+		if isBoilerplate(value) || isGenericJob(value) {
+			if encoded, err := json.Marshal(best); err == nil {
+				row[field] = encoded
+				changed = true
+			}
+		}
+		break
+	}
+	return changed
+}
+
 // withBypassSummary attaches the plugin's own counters to bili's overview JSON.
 // An unrecognized or oversized payload is returned untouched rather than lost.
 func (p *plugin) withBypassSummary(body []byte) []byte {
@@ -290,6 +310,28 @@ func (p *plugin) withBypassSummary(body []byte) []byte {
 		return body
 	}
 	payload["cpaCompression"] = summary
+	// The Overview page renders its session list from overview.recent, so that
+	// array needs the same display cleanup as the Sessions page.
+	if recent, ok := payload["overview"]; ok {
+		var overview map[string]json.RawMessage
+		if json.Unmarshal(recent, &overview) == nil {
+			var rows []map[string]json.RawMessage
+			if json.Unmarshal(overview["recent"], &rows) == nil {
+				changed := false
+				for _, row := range rows {
+					changed = readableRow(row) || changed
+				}
+				if changed {
+					if encoded, err := json.Marshal(rows); err == nil {
+						overview["recent"] = encoded
+						if reencoded, err := json.Marshal(overview); err == nil {
+							payload["overview"] = reencoded
+						}
+					}
+				}
+			}
+		}
+	}
 	merged, err := json.Marshal(payload)
 	if err != nil || len(merged) > webUIReadLimit {
 		return body
