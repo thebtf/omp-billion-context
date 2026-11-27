@@ -40,8 +40,8 @@
 <body>
 	<main>
 		<h1>Billion Context</h1>
-		<p>Use your CPA management key to open read-only Overview and Sessions. An accepted key stays in this tab until you
-			lock the WebUI or CPA rejects it.</p>
+		<p>Use your CPA management key to open read-only Overview and Sessions. An accepted key stays in this browser
+			until you lock the WebUI or CPA rejects it.</p>
 		<form autocomplete="off">
 			<label for="management-key">CPA management key</label>
 			<input id="management-key" type="password" aria-describedby="status" required>
@@ -72,14 +72,14 @@
 			for (const list of dismissPaths.values()) {
 				let ids = [];
 				try {
-					const saved = JSON.parse(sessionStorage.getItem('omp-billion-context.' + list));
+					const saved = JSON.parse(localStorage.getItem('omp-billion-context.' + list));
 					if (Array.isArray(saved)) ids = saved.slice(-dismissLimit).filter(validID);
 				} catch { }
 				dismissed.set(list, new Set(ids));
 			}
 
 			function clearSavedKey() {
-				try {sessionStorage.removeItem(savedKey);} catch { }
+				try {localStorage.removeItem(savedKey);} catch { }
 			}
 
 			function read(target, key, signal) {
@@ -102,7 +102,7 @@
 				if (!ids.has(id)) {
 					ids.add(id);
 					if (ids.size > dismissLimit) ids.delete(ids.values().next().value);
-					try {sessionStorage.setItem('omp-billion-context.' + list, JSON.stringify([...ids]));} catch { }
+					try {localStorage.setItem('omp-billion-context.' + list, JSON.stringify([...ids]));} catch { }
 				}
 				return jsonResponse(200, {ok: true});
 			}
@@ -162,18 +162,17 @@
 					#session-detail-view .v:has(> a[href^="#/logs?"]) { display: none !important; }
 					#cpa-webui-notice {
 						display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem;
-						box-sizing: border-box; min-height: 5rem; padding: .5rem 14rem .5rem 1rem;
+						box-sizing: border-box; min-height: 0; padding: .25rem .5rem .25rem .75rem;
+						font-size: .8125rem; line-height: 1.4;
 						background: var(--bg-muted); border-bottom: 1px solid var(--border);
 					}
-					@media (max-width: 700px) {
-						#cpa-webui-notice { padding: 5rem 1rem .5rem; }
-					}
+					#cpa-webui-notice span { flex: 1 1 12rem; }
 				`;
 				document.head.append(style);
 				const notice = document.createElement('aside');
 				notice.id = 'cpa-webui-notice';
 				notice.setAttribute('aria-label', 'CPA WebUI access');
-				notice.innerHTML = `<span>Read-only Overview and Sessions in CPA.</span>
+				notice.innerHTML = `<span>Overview and Sessions are read-only here; compression keeps its own settings.</span>
 					<button class="btn sm" type="button">Lock WebUI</button><span id="cpa-webui-status" role="status"></span>`;
 				notice.querySelector('button').addEventListener('click', () => {
 					key = '';
@@ -203,7 +202,7 @@
 						status.textContent = 'Could not open the bili WebUI (HTTP ' + response.status + '). Try again.';
 					} else {
 						const html = await response.text();
-						try {sessionStorage.setItem(savedKey, key);} catch { }
+						try {localStorage.setItem(savedKey, key);} catch { }
 						showNativeUI(html, key);
 						return;
 					}
@@ -220,7 +219,7 @@
 				if (!button.disabled) open(input.value);
 			});
 			let key;
-			try {key = sessionStorage.getItem(savedKey);} catch { }
+			try {key = localStorage.getItem(savedKey);} catch { }
 			if (key) open(key);
 		})();
 	</script>

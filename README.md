@@ -56,6 +56,14 @@ The plugin handles authenticated HTTP Chat Completions and Responses when the re
 
 A fold necessarily rewrites part of the prompt. The integration tests observe the provider-side cache key, credential and unchanged prefix across a fold and its next turn. They do not measure a live provider's cache hit rate. CPA's own routing strategy still applies: an actual account switch, expiry or model switch can invalidate a warm cache. Nested model calls may appear as separate traces in LLM Tracing.
 
+## Uncompressed requests
+
+A request that stays on the native CPA path is not an error, but some reasons are fixable by the operator. Those are logged once per ten minutes with the running count: `missing_caller_scope` (CPA did not report an authenticated caller), `missing_session_id`, `ambiguous_session_id`, and `unusable_session_id`. Each names the request that lost compression, so a client that never sends a conversation ID is visible instead of silently uncompressed.
+
+The same counters are available without log access. `/v0/management/plugins/omp-billion-context/webui-data?target=/bypass` returns `{"counts":{...},"uncompressed":N}`, and the read-only overview response carries the same object as `cpaCompression`. `uncompressed` counts only the actionable reasons. Ordinary traffic that CPA routes through every plugin model router is counted separately and stays quiet.
+
+Session rows show the text a conversation starts with, so a wrapper tag such as `<system-reminder>` or `<job>` would otherwise become the title. The read-only bridge rewrites only those display strings and leaves identifiers, counters and unknown fields byte-identical.
+
 ## Build and test
 
 On the target platform, install Go, a C compiler, Node.js and Python. Run `npm ci --omit=dev --ignore-scripts` and `python scripts/package_runtime.py`. Use `python scripts/release.py library --target <os>-<arch>` to get the canonical versioned library filename, then build with CGO enabled and `go build -buildmode=c-shared -o <plugin-library> .`. Supported targets are `linux-amd64`, `darwin-arm64`, and `windows-amd64`.

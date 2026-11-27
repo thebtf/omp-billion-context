@@ -98,6 +98,7 @@ type plugin struct {
 	streams      sync.WaitGroup
 	streamCount  int
 	streamIdle   chan struct{}
+	skips        skipReport
 }
 
 func main() {}
@@ -210,14 +211,15 @@ func (p *plugin) handle(method string, raw []byte) (any, *rpcError) {
 		if json.Unmarshal(raw, &req) != nil {
 			return nil, &rpcError{Code: "invalid_request", Message: "invalid model route request"}
 		}
-		alt := req.Query.Get("alt")
-		if !req.Query.Has("alt") {
-			alt = req.Query.Get("$alt")
+		reason := alternateSkipReason(req.Query)
+		if reason == compressible {
+			reason, _ = classify(req.RequestedModel, req.SourceFormat, req.Headers, req.Metadata, req.Body)
 		}
-		if (alt == "" || alt == "sse") && requestSession(req.RequestedModel, req.SourceFormat, req.Headers, req.Metadata, req.Body) != "" {
-			return routeResponse{Handled: true, TargetKind: "self"}, nil
+		if reason != compressible {
+			p.reportSkip(reason, req.RequestedModel)
+			return routeResponse{}, nil
 		}
-		return routeResponse{}, nil
+		return routeResponse{Handled: true, TargetKind: "self"}, nil
 	case "executor.identifier":
 		return map[string]string{"identifier": pluginID}, nil
 	case "executor.execute", "executor.execute_stream":

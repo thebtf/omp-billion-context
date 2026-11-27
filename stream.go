@@ -64,7 +64,12 @@ func (p *plugin) forwardStream(req executorRequest, body io.Reader) {
 			}
 			payload = frame.responsesPayload()
 		}
-		if p.call("host.stream.emit", streamEmit{StreamID: req.StreamID, Payload: payload}, nil) != nil || terminal {
+		if failure := p.call("host.stream.emit", streamEmit{StreamID: req.StreamID, Payload: payload}, nil); failure != nil {
+			closeMessage.Error = "CPA could not deliver a billion-context stream event"
+			return
+		}
+		if terminal {
+			closeMessage.Error = ""
 			return
 		}
 		frame.reset()

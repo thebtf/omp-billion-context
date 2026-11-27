@@ -18,7 +18,8 @@ const (
 	webUIResource  = "/webui"
 	webUIRoute     = "/plugins/" + pluginID + "/webui-data"
 	biliWebUIRoot  = "/__bili/"
-	webUITimeout   = 10 * time.Second
+	innerRoute     = "/bypass"
+	webUITimeout   = 30 * time.Second
 	webUIReadLimit = 8 << 20
 )
 
@@ -74,6 +75,9 @@ func (p *plugin) handleManagement(raw []byte) managementResponse {
 	case "/v0/resource/plugins/" + pluginID + webUIResource:
 		return newManagementResponse(http.StatusOK, "text/html; charset=utf-8", webUIShell)
 	case "/v0/management" + webUIRoute:
+		if target := req.Query.Get("target"); target == innerRoute && len(req.Query) == 1 {
+			return p.bypassSummary()
+		}
 		target, ok := webUITarget(req.Query)
 		if !ok {
 			return managementError(http.StatusBadRequest, "Unsupported billion-context read target")
@@ -183,7 +187,87 @@ func (p *plugin) readWebUI(target *url.URL) managementResponse {
 	if err != nil || len(body) > webUIReadLimit {
 		return managementError(http.StatusBadGateway, "Bundled billion-context response could not be read in full")
 	}
+	if target.Path == biliWebUIRoot+"overview" && response.StatusCode == http.StatusOK {
+		body = p.withBypassSummary(body)
+	}
+	if target.Path == biliWebUIRoot+"sessions" && response.StatusCode == http.StatusOK {
+		body = withReadableTitles(body)
+	}
 	return newManagementResponse(response.StatusCode, contentType, body)
+}
+
+// withReadableTitles rewrites only the display strings of a sessions page.
+// Identifiers, counters and unknown fields pass through byte-identical.
+func withReadableTitles(body []byte) []byte {
+	var page map[string]json.RawMessage
+	if json.Unmarshal(body, &page) != nil || page == nil {
+		return body
+	}
+	var rows []map[string]json.RawMessage
+	if json.Unmarshal(page["sessions"], &rows) != nil {
+		return body
+	}
+	changed := false
+	for _, row := range rows {
+		for _, field := range []string{"firstBlockHint", "title", "hostTitle"} {
+			raw, ok := row[field]
+			if !ok {
+				continue
+			}
+			var value string
+			if json.Unmarshal(raw, &value) != nil || !strings.Contains(value, "<") {
+				continue
+			}
+			if readable := sessionTitle(value); readable != "" && readable != value {
+				if encoded, err := json.Marshal(readable); err == nil {
+					row[field] = encoded
+					changed = true
+				}
+			}
+		}
+	}
+	if !changed {
+		return body
+	}
+	encoded, err := json.Marshal(rows)
+	if err != nil || len(encoded) > webUIReadLimit {
+		return body
+	}
+	page["sessions"] = encoded
+	merged, err := json.Marshal(page)
+	if err != nil || len(merged) > webUIReadLimit {
+		return body
+	}
+	return merged
+}
+
+// withBypassSummary attaches the plugin's own counters to bili's overview JSON.
+// An unrecognized or oversized payload is returned untouched rather than lost.
+func (p *plugin) withBypassSummary(body []byte) []byte {
+	var payload map[string]json.RawMessage
+	if json.Unmarshal(body, &payload) != nil || payload == nil {
+		return body
+	}
+	counts, total := p.skips.snapshot()
+	summary, err := json.Marshal(map[string]any{"counts": counts, "uncompressed": total})
+	if err != nil {
+		return body
+	}
+	payload["cpaCompression"] = summary
+	merged, err := json.Marshal(payload)
+	if err != nil || len(merged) > webUIReadLimit {
+		return body
+	}
+	return merged
+}
+
+func (p *plugin) bypassSummary() managementResponse {
+	counts, total := p.skips.snapshot()
+	body, err := json.Marshal(map[string]any{"counts": counts, "uncompressed": total})
+	if err != nil {
+		return managementError(http.StatusInternalServerError, "Could not read bypass counters")
+	}
+	return newManagementResponse(http.StatusOK, "application/json", body)
 }
 
 func newManagementResponse(status int, contentType string, body []byte) managementResponse {
