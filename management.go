@@ -231,6 +231,7 @@ func withReadableTitles(body []byte) []byte {
 func readableRow(row map[string]json.RawMessage) bool {
 	fields := []string{"title", "hostTitle", "firstBlockHint"}
 	cleaned := make(map[string]string, len(fields))
+	empty := make(map[string]bool, len(fields))
 	changed := false
 	for _, field := range fields {
 		raw, ok := row[field]
@@ -243,6 +244,13 @@ func readableRow(row map[string]json.RawMessage) bool {
 		}
 		readable := sessionTitle(value)
 		if readable == "" {
+			// A field that was nothing but wrapper tags must not keep them;
+			// clearing it lets an informative sibling name the row.
+			empty[field] = true
+			if encoded, err := json.Marshal(""); err == nil {
+				row[field] = encoded
+				changed = true
+			}
 			continue
 		}
 		cleaned[field] = readable
@@ -267,6 +275,13 @@ func readableRow(row map[string]json.RawMessage) bool {
 		return changed
 	}
 	for _, field := range fields {
+		if empty[field] {
+			if encoded, err := json.Marshal(best); err == nil {
+				row[field] = encoded
+				changed = true
+			}
+			continue
+		}
 		value, ok := cleaned[field]
 		if !ok {
 			continue
