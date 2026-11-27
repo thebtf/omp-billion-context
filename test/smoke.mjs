@@ -403,6 +403,24 @@ try {
 	const opaqueBody = await opaque.text();
 	assert.equal(opaque.status, 200, opaqueBody);
 	assert.equal(requests.at(-1).body.tools?.length ?? 0, 0, 'Encrypted continuation must stay on the ordinary CPA route');
+	const protectedInput = {
+		model, reasoning: { context: 'current_turn' }, max_output_tokens: 1000, input: [
+			...messages,
+			{ type: 'reasoning', id: 'rs_fixture', encrypted_content: 'synthetic-blob', summary: [] },
+			{ type: 'function_call', id: 'fc_fixture', call_id: 'call_fixture', name: 'lookup', arguments: '{}' },
+			{ type: 'function_call_output', call_id: 'call_fixture', output: 'done' },
+			{ role: 'user', content: 'Start the next turn.' },
+		]
+	};
+	const priorSkips = async () => (await (await readWebUI('/bypass')).json()).formats?.['openai-response']?.previous_response_id ?? 0;
+	const beforeDelta = await priorSkips();
+	const protectedReply = await call('responses', protectedInput, { 'x-acp-session': 'protected-responses' });
+	assert.equal(protectedReply.status, 200, await protectedReply.text());
+	assert(requests.at(-1).body.tools?.some(tool => tool.function?.name === 'compress'), 'Identified full replay must enter bili through CPA');
+	const delta = await call('responses', { ...protectedInput, previous_response_id: 'resp_fixture' });
+	await delta.text();
+	assert.equal(await priorSkips(), beforeDelta + 1, 'A server-side continuation must bypass the executor');
+	console.log('CPA compressed an eligible Responses replay and kept its server-side continuation native');
 	for (const query of ['alt=sse', '$alt=sse']) {
 		const sse = await call(`chat/completions?${query}`, { model, messages, stream: true });
 		const sseBody = await sse.text();

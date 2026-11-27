@@ -75,7 +75,7 @@ func TestCompressionIdentityIsScopedAndCacheKeyIsNotRewritten(t *testing.T) {
 		t.Fatal("models share a session")
 	}
 	headers.Set("X-Session-Id", "conflicting-id")
-	if _, eligible := requestSession("model", chat, headers, metadata, payload); eligible {
+	if id, _ := requestSession("model", chat, headers, metadata, payload); id != "" {
 		t.Fatal("claimed ambiguous session")
 	}
 }

@@ -30,7 +30,7 @@ func TestClaudeRequestsAreEligible(t *testing.T) {
 			if tc.name == "wrong endpoint" {
 				meta = map[string]any{"caller_scope": "owner", "request_path": paths[chat]}
 			}
-			got, session := classify("model", claude, tc.headers, meta, body)
+			got, session, _ := classify("model", claude, tc.headers, meta, body)
 			if got != tc.want {
 				t.Fatalf("classify = %q, want %q", got, tc.want)
 			}
@@ -47,11 +47,11 @@ func TestClaudeWithoutHeadersUsesTheOpeningTurn(t *testing.T) {
 	metadata := map[string]any{"caller_scope": "owner", "request_path": paths[claude]}
 	first := []byte(`{"model":"m","messages":[{"role":"user","content":"start here"}],"max_tokens":1000}`)
 	later := []byte(`{"model":"m","messages":[{"role":"user","content":"start here"},{"role":"assistant","content":"ok"},{"role":"user","content":"more"}],"max_tokens":1000}`)
-	reason, session := classify("model", claude, http.Header{}, metadata, first)
+	reason, session, _ := classify("model", claude, http.Header{}, metadata, first)
 	if reason != compressible || session == "" {
 		t.Fatalf("classify = %q, %q", reason, session)
 	}
-	if again, laterSession := classify("model", claude, http.Header{}, metadata, later); again != compressible || laterSession != session {
+	if again, laterSession, _ := classify("model", claude, http.Header{}, metadata, later); again != compressible || laterSession != session {
 		t.Fatalf("the identity must not change as the conversation grows: %q %q vs %q", again, laterSession, session)
 	}
 }
@@ -62,11 +62,11 @@ func TestResponsesWithoutHeadersUsesTheOpeningTurn(t *testing.T) {
 	metadata := map[string]any{"caller_scope": "owner", "request_path": paths[responses]}
 	first := []byte(`{"model":"m","input":[{"role":"user","content":[{"type":"input_text","text":"start here"}]}]}`)
 	later := []byte(`{"model":"m","input":[{"role":"user","content":[{"type":"input_text","text":"start here"}]},{"role":"assistant","content":[{"type":"output_text","text":"ok"}]},{"role":"user","content":[{"type":"input_text","text":"more"}]}]}`)
-	reason, session := classify("model", responses, http.Header{}, metadata, first)
+	reason, session, _ := classify("model", responses, http.Header{}, metadata, first)
 	if reason != compressible || session == "" {
 		t.Fatalf("classify = %q, %q", reason, session)
 	}
-	if again, laterSession := classify("model", responses, http.Header{}, metadata, later); again != compressible || laterSession != session {
+	if again, laterSession, _ := classify("model", responses, http.Header{}, metadata, later); again != compressible || laterSession != session {
 		t.Fatalf("the identity must not change as the conversation grows: %q %q vs %q", again, laterSession, session)
 	}
 }
@@ -74,7 +74,7 @@ func TestResponsesWithoutHeadersUsesTheOpeningTurn(t *testing.T) {
 func TestClaudeRejectsAnEmptyConversation(t *testing.T) {
 	metadata := map[string]any{"caller_scope": "owner", "request_path": paths[claude]}
 	headers := http.Header{"Agent-Session-Id": {"s"}}
-	if got, _ := classify("model", claude, headers, metadata, []byte(`{"model":"m","messages":[]}`)); got != emptyConversation {
+	if got, _, _ := classify("model", claude, headers, metadata, []byte(`{"model":"m","messages":[]}`)); got != emptyConversation {
 		t.Fatalf("classify = %q", got)
 	}
 }

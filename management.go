@@ -305,7 +305,7 @@ func (p *plugin) withBypassSummary(body []byte) []byte {
 		return body
 	}
 	counts, total, formats := p.skips.detail()
-	summary, err := json.Marshal(map[string]any{"counts": counts, "uncompressed": total, "formats": formats})
+	summary, err := json.Marshal(map[string]any{"counts": counts, "uncompressed": total, "formats": formats, "protected_fallbacks": p.protectedFallbacks.Load()})
 	if err != nil {
 		return body
 	}
@@ -341,7 +341,7 @@ func (p *plugin) withBypassSummary(body []byte) []byte {
 
 func (p *plugin) bypassSummary() managementResponse {
 	counts, total, formats := p.skips.detail()
-	body, err := json.Marshal(map[string]any{"counts": counts, "uncompressed": total, "formats": formats})
+	body, err := json.Marshal(map[string]any{"counts": counts, "uncompressed": total, "formats": formats, "protected_fallbacks": p.protectedFallbacks.Load()})
 	if err != nil {
 		return managementError(http.StatusInternalServerError, "Could not read bypass counters")
 	}

@@ -322,6 +322,10 @@ func startEngine(startupCtx, lifetimeCtx context.Context) (engine, error) {
 	if err != nil {
 		return engine{}, &engineStartupError{stage: "storage", cause: err}
 	}
+	return startEngineAt(startupCtx, lifetimeCtx, dataRoot)
+}
+
+func startEngineAt(startupCtx, lifetimeCtx context.Context, dataRoot string) (engine, error) {
 	data, err := bundledRuntime.ReadFile("bundle/runtime.json")
 	if err != nil {
 		return engine{}, &engineStartupError{stage: "extract", cause: err}

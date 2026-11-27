@@ -22,8 +22,15 @@ const (
 	websocketUpgrade   skipReason = "websocket"
 	invalidPayload     skipReason = "invalid_payload"
 	emptyConversation  skipReason = "empty_conversation"
-	opaqueContinuation skipReason = "opaque_continuation"
+	previousResponse   skipReason = "previous_response_id"
+	serverConversation skipReason = "server_conversation"
+	backgroundRequest  skipReason = "background"
+	compactInput       skipReason = "compaction_input"
+	itemReference      skipReason = "item_reference"
 	encryptedReasoning skipReason = "encrypted_reasoning"
+	reasoningContext   skipReason = "reasoning_context"
+	activeReasoning    skipReason = "active_reasoning_turn"
+	protectedNeedsID   skipReason = "protected_requires_session_id"
 	missingSessionID   skipReason = "missing_session_id"
 	ambiguousSessionID skipReason = "ambiguous_session_id"
 	unusableSessionID  skipReason = "unusable_session_id"
@@ -36,6 +43,7 @@ var silentReasons = map[skipReason]bool{
 	missingSessionID:   true,
 	ambiguousSessionID: true,
 	unusableSessionID:  true,
+	protectedNeedsID:   true,
 }
 
 var sessionHeaders = []string{
@@ -48,69 +56,99 @@ var sessionHeaders = []string{
 
 // classify is the single eligibility rule shared by routing and execution. It
 // also returns the caller's conversation ID, so the payload is parsed once.
-func classify(model string, format protocol, headers http.Header, metadata map[string]any, payload []byte) (skipReason, string) {
+func classify(model string, format protocol, headers http.Header, metadata map[string]any, payload []byte) (skipReason, string, protectedGroups) {
+	var groups protectedGroups
 	path, supported := paths[format]
 	scope, _ := metadata["caller_scope"].(string)
 	requestPath, _ := metadata["request_path"].(string)
 	source, _ := metadata["source"].(string)
 	switch {
 	case model == "" || !supported:
-		return unsupportedFormat, ""
+		return unsupportedFormat, "", nil
 	case requestPath != path:
-		return otherEndpoint, ""
+		return otherEndpoint, "", nil
 	case source == "plugin_host_model_callback":
-		return nestedCallback, ""
+		return nestedCallback, "", nil
 	case headers.Get("Upgrade") != "":
-		return websocketUpgrade, ""
+		return websocketUpgrade, "", nil
 	case scope == "":
-		return missingCallerScope, ""
+		return missingCallerScope, "", nil
 	}
 	var body struct {
 		Messages           []json.RawMessage `json:"messages"`
 		Input              json.RawMessage   `json:"input"`
 		PromptCacheKey     string            `json:"prompt_cache_key"`
 		SessionID          string            `json:"session_id"`
+		Reasoning          json.RawMessage   `json:"reasoning"`
 		PreviousResponseID string            `json:"previous_response_id"`
 		Conversation       json.RawMessage   `json:"conversation"`
 		Background         bool              `json:"background"`
 	}
 	if json.Unmarshal(payload, &body) != nil {
-		return invalidPayload, ""
+		return invalidPayload, "", nil
 	}
 	if format == chat && len(body.Messages) == 0 {
-		return emptyConversation, ""
+		return emptyConversation, "", nil
 	}
 	// Anthropic calls carry the system prompt outside messages, so the same
 	// "is there a conversation" test applies to a non-empty messages array.
 	if format == claude && len(body.Messages) == 0 {
-		return emptyConversation, ""
+		return emptyConversation, "", nil
 	}
+	opening := body.Messages
 	if format == responses {
 		if len(body.Input) == 0 {
-			return emptyConversation, ""
+			return emptyConversation, "", nil
 		}
-		if body.PreviousResponseID != "" || (len(body.Conversation) != 0 && string(body.Conversation) != "null") || body.Background {
-			return opaqueContinuation, ""
+		switch {
+		case body.PreviousResponseID != "":
+			return previousResponse, "", nil
+		case len(body.Conversation) != 0 && string(body.Conversation) != "null":
+			return serverConversation, "", nil
+		case body.Background:
+			return backgroundRequest, "", nil
 		}
 		if body.Input[0] == '[' {
-			var items []struct {
-				Type             string `json:"type"`
-				EncryptedContent string `json:"encrypted_content"`
+			if json.Unmarshal(body.Input, &opening) != nil || len(opening) == 0 {
+				return invalidPayload, "", nil
 			}
-			if json.Unmarshal(body.Input, &items) != nil || len(items) == 0 {
-				return invalidPayload, ""
-			}
-			for _, item := range items {
-				switch item.Type {
-				case "compaction", "compaction_trigger", "item_reference":
-					return opaqueContinuation, ""
+			hasEncrypted := false
+			for _, raw := range opening {
+				var item struct {
+					Type             string          `json:"type"`
+					EncryptedContent json.RawMessage `json:"encrypted_content"`
 				}
-				if item.EncryptedContent != "" {
-					return encryptedReasoning, ""
+				if json.Unmarshal(raw, &item) != nil {
+					return invalidPayload, "", nil
+				}
+				switch item.Type {
+				case "compaction", "compaction_trigger", "compaction_summary":
+					return compactInput, "", nil
+				case "item_reference":
+					return itemReference, "", nil
+				}
+				if len(item.EncryptedContent) != 0 {
+					hasEncrypted = true
+				}
+			}
+			if hasEncrypted {
+				var ok bool
+				groups, ok = protectedInput(body.Input)
+				if !ok || len(groups) == 0 {
+					return encryptedReasoning, "", nil
+				}
+				var reasoning struct {
+					Context string `json:"context"`
+				}
+				if json.Unmarshal(body.Reasoning, &reasoning) != nil || reasoning.Context != "current_turn" {
+					return reasoningContext, "", nil
+				}
+				if !newUserTurn(opening[len(opening)-1]) {
+					return activeReasoning, "", nil
 				}
 			}
 		} else if body.Input[0] != '"' {
-			return invalidPayload, ""
+			return invalidPayload, "", nil
 		}
 	}
 	// A malformed value is not a distinct failure: it simply carries no
@@ -125,17 +163,20 @@ func classify(model string, format protocol, headers http.Header, metadata map[s
 			}
 		}
 		if len(distinct) > 1 {
-			return ambiguousSessionID, ""
+			return ambiguousSessionID, "", nil
 		}
 		for value := range distinct {
 			if session != "" && value != session {
-				return ambiguousSessionID, ""
+				return ambiguousSessionID, "", nil
 			}
 			session = value
 		}
 	}
 	if session == "" {
 		session = body.SessionID
+	}
+	if len(groups) != 0 && session == "" {
+		return protectedNeedsID, "", nil
 	}
 	if session == "" {
 		session = body.PromptCacheKey
@@ -146,19 +187,41 @@ func classify(model string, format protocol, headers http.Header, metadata map[s
 	// share compression state. The conversation's opening turn gives the identity
 	// here, and requestSession folds caller, model and protocol into the value it
 	// sends, so the engine can only ever match a request to its own caller.
-	var opening []json.RawMessage
-	if format == responses && len(body.Input) != 0 && body.Input[0] == '[' {
-		_ = json.Unmarshal(body.Input, &opening)
-	} else {
-		opening = body.Messages
-	}
 	if session == "" {
 		session = openingTurn(opening)
 	}
 	if !validSession(session) {
-		return unusableSessionID, ""
+		return unusableSessionID, "", nil
 	}
-	return compressible, session
+	return compressible, session, groups
+}
+
+func newUserTurn(raw json.RawMessage) bool {
+	var item struct {
+		Type    string          `json:"type"`
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(raw, &item) != nil || item.Role != "user" || (item.Type != "" && item.Type != "message") {
+		return false
+	}
+	var text string
+	if json.Unmarshal(item.Content, &text) == nil {
+		return strings.TrimSpace(text) != ""
+	}
+	var parts []struct {
+		Type string
+		Text string
+	}
+	if json.Unmarshal(item.Content, &parts) != nil {
+		return false
+	}
+	for _, part := range parts {
+		if part.Type == "input_text" && strings.TrimSpace(part.Text) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func alternateSkipReason(query map[string][]string) skipReason {

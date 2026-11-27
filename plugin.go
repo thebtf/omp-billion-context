@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 const pluginID = "omp-billion-context"
@@ -89,18 +90,19 @@ type engineAttempt struct {
 }
 
 type plugin struct {
-	engineMu     sync.Mutex
-	attempt      *engineAttempt
-	startEngine  func(startupCtx, lifetimeCtx context.Context) (engine, error)
-	shutdownOnce sync.Once
-	call         hostCall
-	ctx          context.Context
-	cancel       context.CancelFunc
-	streamMu     sync.Mutex
-	streams      sync.WaitGroup
-	streamCount  int
-	streamIdle   chan struct{}
-	skips        skipReport
+	engineMu           sync.Mutex
+	attempt            *engineAttempt
+	startEngine        func(startupCtx, lifetimeCtx context.Context) (engine, error)
+	shutdownOnce       sync.Once
+	call               hostCall
+	ctx                context.Context
+	cancel             context.CancelFunc
+	streamMu           sync.Mutex
+	streams            sync.WaitGroup
+	streamCount        int
+	streamIdle         chan struct{}
+	skips              skipReport
+	protectedFallbacks atomic.Uint64
 }
 
 func main() {}
@@ -215,7 +217,7 @@ func (p *plugin) handle(method string, raw []byte) (any, *rpcError) {
 		}
 		reason := alternateSkipReason(req.Query)
 		if reason == compressible {
-			reason, _ = classify(req.RequestedModel, req.SourceFormat, req.Headers, req.Metadata, req.Body)
+			reason, _, _ = classify(req.RequestedModel, req.SourceFormat, req.Headers, req.Metadata, req.Body)
 		}
 		if reason != compressible {
 			p.reportSkip(reason, req.SourceFormat, req.RequestedModel)
