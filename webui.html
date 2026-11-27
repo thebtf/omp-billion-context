@@ -80,6 +80,7 @@
 
 			function clearSavedKey() {
 				try {localStorage.removeItem(savedKey);} catch { }
+				try {sessionStorage.removeItem(savedKey);} catch { }
 			}
 
 			function read(target, key, signal) {
@@ -183,6 +184,13 @@
 				window.addEventListener('pagehide', () => {key = '';}, {once: true});
 				window.addEventListener('pageshow', event => {
 					if (event.persisted) location.reload();
+				});
+				// Locking in one tab must revoke the live key everywhere; the
+				// storage event is the only signal the other tabs receive.
+				window.addEventListener('storage', event => {
+					if (event.key !== savedKey || event.newValue !== null) return;
+					key = '';
+					location.reload();
 				});
 			}
 
