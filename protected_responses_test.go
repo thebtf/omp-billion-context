@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -50,6 +51,22 @@ func TestProtectedGroupIntegrity(t *testing.T) {
 		raw := body(original)
 		if groups.intact(append([]byte("{"+field), raw[1:]...)) {
 			t.Fatal("accepted server-owned continuation")
+		}
+	}
+}
+
+func TestAmbiguousReasoningModeNeverEntersProtectedReplay(t *testing.T) {
+	meta := map[string]any{"caller_scope": "client", "request_path": paths[responses]}
+	h := http.Header{"X-Session-Id": {"s"}}
+	_, _, groups := classify("m", responses, h, meta, []byte(protectedFixture))
+	if len(groups) != 1 {
+		t.Fatal("control not admitted")
+	}
+	for _, pair := range [][2]string{{`"context":"current_turn"`, `"Context":"current_turn"`}, {`"context":"current_turn"`, `"context":"all_turns","Context":"current_turn"`}, {`"context":"current_turn"`, `"context":"all_turns","context":"current_turn"`}, {`"reasoning":`, `"Reasoning":`}} {
+		wire := []byte(strings.Replace(protectedFixture, pair[0], pair[1], 1))
+		reason, _, _ := classify("m", responses, h, meta, wire)
+		if reason == compressible || groups.intact(wire) {
+			t.Fatal("ambiguous protected context accepted")
 		}
 	}
 }

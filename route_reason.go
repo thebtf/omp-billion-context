@@ -79,7 +79,6 @@ func classify(model string, format protocol, headers http.Header, metadata map[s
 		Input              json.RawMessage   `json:"input"`
 		PromptCacheKey     string            `json:"prompt_cache_key"`
 		SessionID          string            `json:"session_id"`
-		Reasoning          json.RawMessage   `json:"reasoning"`
 		PreviousResponseID string            `json:"previous_response_id"`
 		Conversation       json.RawMessage   `json:"conversation"`
 		Background         bool              `json:"background"`
@@ -97,6 +96,10 @@ func classify(model string, format protocol, headers http.Header, metadata map[s
 	}
 	opening := body.Messages
 	if format == responses {
+		reasoning, exact := exactReplayField(payload, "reasoning")
+		if !exact {
+			return invalidPayload, "", nil
+		}
 		if len(body.Input) == 0 {
 			return emptyConversation, "", nil
 		}
@@ -137,10 +140,7 @@ func classify(model string, format protocol, headers http.Header, metadata map[s
 				if !ok || len(groups) == 0 {
 					return encryptedReasoning, "", nil
 				}
-				var reasoning struct {
-					Context string `json:"context"`
-				}
-				if json.Unmarshal(body.Reasoning, &reasoning) != nil || reasoning.Context != "current_turn" {
+				if !currentTurn(reasoning) {
 					return reasoningContext, "", nil
 				}
 				if !newUserTurn(opening[len(opening)-1]) {
@@ -202,6 +202,9 @@ func newUserTurn(raw json.RawMessage) bool {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
 	}
+	if _, exact := exactReplayField(raw, "role"); !exact {
+		return false
+	}
 	if json.Unmarshal(raw, &item) != nil || item.Role != "user" || (item.Type != "" && item.Type != "message") {
 		return false
 	}
@@ -209,15 +212,12 @@ func newUserTurn(raw json.RawMessage) bool {
 	if json.Unmarshal(item.Content, &text) == nil {
 		return strings.TrimSpace(text) != ""
 	}
-	var parts []struct {
-		Type string
-		Text string
-	}
+	var parts []replayItem
 	if json.Unmarshal(item.Content, &parts) != nil {
 		return false
 	}
 	for _, part := range parts {
-		if part.Type == "input_text" && strings.TrimSpace(part.Text) != "" {
+		if part.str("type") == "input_text" && strings.TrimSpace(part.str("text")) != "" {
 			return true
 		}
 	}

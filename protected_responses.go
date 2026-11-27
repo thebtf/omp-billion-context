@@ -76,17 +76,49 @@ func protectedInput(input json.RawMessage) (protectedGroups, bool) {
 	return groups, true
 }
 
+// Go's struct decoder matches keys case-insensitively and accepts duplicates.
+// A provider is not required to resolve those ambiguities the same way.
+func exactReplayField(object []byte, name string) (json.RawMessage, bool) {
+	d := json.NewDecoder(bytes.NewReader(object))
+	if tok, err := d.Token(); err != nil || tok != json.Delim('{') {
+		return nil, false
+	}
+	seen := map[string]bool{}
+	var field, scratch json.RawMessage
+	for d.More() {
+		tok, err := d.Token()
+		key, ok := tok.(string)
+		if err != nil || !ok || seen[key] || strings.ToLower(key) != key {
+			return nil, false
+		}
+		seen[key] = true
+		if key == name {
+			if err := d.Decode(&field); err != nil {
+				return nil, false
+			}
+		} else if err := d.Decode(&scratch); err != nil {
+			return nil, false
+		}
+	}
+	_, err := d.Token()
+	return field, err == nil
+}
+
+func currentTurn(raw json.RawMessage) bool {
+	value, ok := exactReplayField(raw, "context")
+	var mode string
+	return ok && json.Unmarshal(value, &mode) == nil && mode == "current_turn"
+}
+
 func (groups protectedGroups) intact(body []byte) bool {
 	var replay struct {
-		Input     json.RawMessage `json:"input"`
-		Reasoning struct {
-			Context string `json:"context"`
-		} `json:"reasoning"`
+		Input        json.RawMessage `json:"input"`
 		Previous     string          `json:"previous_response_id"`
 		Conversation json.RawMessage `json:"conversation"`
 		Background   bool            `json:"background"`
 	}
-	if json.Unmarshal(body, &replay) != nil || replay.Previous != "" || replay.Background || (len(replay.Conversation) != 0 && string(replay.Conversation) != "null") || replay.Reasoning.Context != "current_turn" {
+	reasoning, exact := exactReplayField(body, "reasoning")
+	if !exact || !currentTurn(reasoning) || json.Unmarshal(body, &replay) != nil || replay.Previous != "" || replay.Background || (len(replay.Conversation) != 0 && string(replay.Conversation) != "null") {
 		return false
 	}
 	got, ok := protectedInput(replay.Input)
