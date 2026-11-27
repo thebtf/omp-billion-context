@@ -40,8 +40,8 @@
 <body>
 	<main>
 		<h1>Billion Context</h1>
-		<p>Use your CPA management key to open read-only Overview and Sessions. An accepted key stays in this tab until you
-			lock the WebUI or CPA rejects it.</p>
+		<p>Use your CPA management key to open read-only Overview and Sessions. An accepted key stays in this browser
+			until you lock the WebUI or CPA rejects it.</p>
 		<form autocomplete="off">
 			<label for="management-key">CPA management key</label>
 			<input id="management-key" type="password" aria-describedby="status" required>
@@ -72,13 +72,14 @@
 			for (const list of dismissPaths.values()) {
 				let ids = [];
 				try {
-					const saved = JSON.parse(sessionStorage.getItem('omp-billion-context.' + list));
+					const saved = JSON.parse(localStorage.getItem('omp-billion-context.' + list));
 					if (Array.isArray(saved)) ids = saved.slice(-dismissLimit).filter(validID);
 				} catch { }
 				dismissed.set(list, new Set(ids));
 			}
 
 			function clearSavedKey() {
+				try {localStorage.removeItem(savedKey);} catch { }
 				try {sessionStorage.removeItem(savedKey);} catch { }
 			}
 
@@ -102,7 +103,7 @@
 				if (!ids.has(id)) {
 					ids.add(id);
 					if (ids.size > dismissLimit) ids.delete(ids.values().next().value);
-					try {sessionStorage.setItem('omp-billion-context.' + list, JSON.stringify([...ids]));} catch { }
+					try {localStorage.setItem('omp-billion-context.' + list, JSON.stringify([...ids]));} catch { }
 				}
 				return jsonResponse(200, {ok: true});
 			}
@@ -162,18 +163,22 @@
 					#session-detail-view .v:has(> a[href^="#/logs?"]) { display: none !important; }
 					#cpa-webui-notice {
 						display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem;
-						box-sizing: border-box; min-height: 5rem; padding: .5rem 14rem .5rem 1rem;
+						box-sizing: border-box; min-height: 0; padding: .25rem .5rem .25rem .75rem;
+						font-size: .8125rem; line-height: 1.4;
 						background: var(--bg-muted); border-bottom: 1px solid var(--border);
 					}
-					@media (max-width: 700px) {
-						#cpa-webui-notice { padding: 5rem 1rem .5rem; }
-					}
+					#cpa-webui-notice span { flex: 1 1 12rem; }
+					/* bili fixes every column except SESSION, so the only elastic
+					   track collapsed and titles lost most of their width. */
+					.embed .twide table.data { table-layout: auto; min-width: 0; }
+					.embed .twide table.data colgroup col:first-child { width: auto !important; }
+					.embed .twide .row-title { max-width: none; overflow: visible; text-overflow: clip; }
 				`;
 				document.head.append(style);
 				const notice = document.createElement('aside');
 				notice.id = 'cpa-webui-notice';
 				notice.setAttribute('aria-label', 'CPA WebUI access');
-				notice.innerHTML = `<span>Read-only Overview and Sessions in CPA.</span>
+				notice.innerHTML = `<span>Overview and Sessions are read-only here; compression keeps its own settings.</span>
 					<button class="btn sm" type="button">Lock WebUI</button><span id="cpa-webui-status" role="status"></span>`;
 				notice.querySelector('button').addEventListener('click', () => {
 					key = '';
@@ -187,14 +192,28 @@
 				});
 			}
 
-			async function open(key) {
+			// Locking in one tab must revoke the live key everywhere, including an
+			// open that is still awaiting CPA. This listener is installed before any
+			// open starts, so a pending request cannot restore the key afterwards.
+			window.addEventListener('storage', event => {
+				if (event.key !== savedKey || event.newValue !== null) return;
+				openGeneration++;
+				key = '';
+				location.reload();
+			});
+
+			async function open(candidate) {
+				const generation = ++openGeneration;
 				input.value = '';
 				input.removeAttribute('aria-invalid');
 				button.disabled = true;
 				progress.hidden = false;
 				status.textContent = 'Opening the bili WebUI…';
 				try {
-					const response = await read(root, key, AbortSignal.timeout(35000));
+					const response = await read(root, candidate, AbortSignal.timeout(35000));
+					// A lock in another tab wins over an open already in flight,
+					// otherwise this tab would store the cleared key again.
+					if (generation !== openGeneration) return;
 					if (denied(response)) {
 						clearSavedKey();
 						input.setAttribute('aria-invalid', 'true');
@@ -203,13 +222,16 @@
 						status.textContent = 'Could not open the bili WebUI (HTTP ' + response.status + '). Try again.';
 					} else {
 						const html = await response.text();
-						try {sessionStorage.setItem(savedKey, key);} catch { }
-						showNativeUI(html, key);
+						if (generation !== openGeneration) return;
+						try {localStorage.setItem(savedKey, candidate);} catch { }
+						showNativeUI(html, candidate);
 						return;
 					}
 				} catch {
+					if (generation !== openGeneration) return;
 					status.textContent = 'Could not connect to the bili WebUI. Try again.';
 				}
+				if (generation !== openGeneration) return;
 				progress.hidden = true;
 				button.disabled = false;
 				input.focus();
@@ -220,7 +242,8 @@
 				if (!button.disabled) open(input.value);
 			});
 			let key;
-			try {key = sessionStorage.getItem(savedKey);} catch { }
+			let openGeneration = 0;
+			try {key = localStorage.getItem(savedKey);} catch { }
 			if (key) open(key);
 		})();
 	</script>

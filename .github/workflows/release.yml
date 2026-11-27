@@ -59,6 +59,7 @@ jobs:
           npm ci --omit=dev --ignore-scripts
           python scripts/package_runtime.py --target "$GOOS-$GOARCH"
           go test ./...
+          node test/webui-storage.mjs
           library=$(python scripts/release.py library --target "$GOOS-$GOARCH")
           go build -buildmode=c-shared -o "$library" .
           python scripts/release.py package --target "$GOOS-$GOARCH" --library "$library" --dist dist
