@@ -41,9 +41,18 @@ func (p *plugin) execute(req executorRequest) (any, *rpcError) {
 	if len(original) == 0 {
 		original = req.Payload
 	}
-	session, eligible := requestSession(req.Model, req.SourceFormat, req.Headers, req.Metadata, original)
-	if !eligible || path == "" || req.SourceFormat != req.Format || req.Alt != "" || !json.Valid(req.Payload) {
+	session, groups := requestSession(req.Model, req.SourceFormat, req.Headers, req.Metadata, original)
+	if session == "" || path == "" || req.SourceFormat != req.Format || req.Alt != "" || !json.Valid(req.Payload) {
 		return nil, &rpcError{Code: "unsupported_request", Message: "request cannot be compressed safely", HTTPStatus: http.StatusBadRequest}
+	}
+	// CPA can supply a normalized execution payload as well as the original
+	// wire request. Never discard its normalization, or let it introduce an
+	// unchecked opaque group between admission and the relay.
+	if req.SourceFormat == responses && !bytes.Equal(original, req.Payload) {
+		reason, _, actual := classify(req.Model, responses, req.Headers, req.Metadata, req.Payload)
+		if reason != compressible || len(actual) != len(groups) || (len(groups) != 0 && !groups.intact(req.Payload)) {
+			return nil, &rpcError{Code: "unsupported_request", Message: "incompatible Responses execution payload", HTTPStatus: http.StatusBadRequest}
+		}
 	}
 	timeout, contentType := nonStreamTimeout, "application/json"
 	if req.Stream {
@@ -55,7 +64,11 @@ func (p *plugin) execute(req executorRequest) (any, *rpcError) {
 		cancel()
 		return nil, engineFailure(err)
 	}
-	origin, release, err := relay.begin(ctx, req, p.call)
+	var guard *replayGuard
+	if len(groups) != 0 {
+		guard = &replayGuard{original: req.Payload, groups: groups, stream: req.Stream, fallbacks: &p.protectedFallbacks}
+	}
+	origin, release, err := relay.begin(ctx, req, guard, p.call)
 	if err != nil {
 		cancel()
 		return nil, sidecarFailure(err)

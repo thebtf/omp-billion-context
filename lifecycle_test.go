@@ -380,7 +380,7 @@ func TestNativeLifecycleBusyRelayCallbackOutlivesCanceledHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	origin, end, err := relay.begin(context.Background(), executorRequest{Model: "model", SourceFormat: chat, Format: chat, HostCallbackID: "caller"}, func(method string, _ any, into any) *rpcError {
+	origin, end, err := relay.begin(context.Background(), executorRequest{Model: "model", SourceFormat: chat, Format: chat, HostCallbackID: "caller"}, nil, func(method string, _ any, into any) *rpcError {
 		if method != hostModelExecute {
 			t.Errorf("unexpected callback %q", method)
 		}

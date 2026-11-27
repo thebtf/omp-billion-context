@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -31,7 +32,7 @@ func TestModelRelayPinsCallerAndModelAcrossRounds(t *testing.T) {
 	const unchanged = `{ "model" : "original-model", "stream": false }`
 	const data = `{"choices":[{"finish_reason":"stop"}]}`
 	requests := make(chan hostModelRequest, 8)
-	origin, end, err := relay.begin(context.Background(), original, func(method string, payload any, into any) *rpcError {
+	origin, end, err := relay.begin(context.Background(), original, nil, func(method string, payload any, into any) *rpcError {
 		switch method {
 		case hostModelExecute, hostModelExecuteStream:
 			request := payload.(hostModelRequest)
@@ -123,7 +124,7 @@ func TestModelRelayPreservesResponsesTerminalEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(relay.stop)
-	origin, end, err := relay.begin(context.Background(), executorRequest{Model: "model", SourceFormat: responses, Format: responses, HostCallbackID: "caller"}, func(method string, _ any, into any) *rpcError {
+	origin, end, err := relay.begin(context.Background(), executorRequest{Model: "model", SourceFormat: responses, Format: responses, HostCallbackID: "caller"}, nil, func(method string, _ any, into any) *rpcError {
 		switch method {
 		case hostModelExecute:
 			return &rpcError{Code: "rate_limit", Message: "quoted \"retry\"\nmessage", HTTPStatus: http.StatusTooManyRequests}
@@ -176,7 +177,7 @@ func TestModelRelayDisconnectClosesBlockedHostStream(t *testing.T) {
 	t.Cleanup(cancel)
 	reading, closed := make(chan struct{}), make(chan struct{})
 	var onceRead, onceClose sync.Once
-	origin, end, err := relay.begin(context.Background(), executorRequest{Model: "model", SourceFormat: chat, Format: chat, HostCallbackID: "caller"}, func(method string, _ any, into any) *rpcError {
+	origin, end, err := relay.begin(context.Background(), executorRequest{Model: "model", SourceFormat: chat, Format: chat, HostCallbackID: "caller"}, nil, func(method string, _ any, into any) *rpcError {
 		switch method {
 		case hostModelExecuteStream:
 			*into.(*hostModelResponse) = hostModelResponse{StatusCode: http.StatusOK, StreamID: "provider-stream"}
@@ -217,5 +218,60 @@ func TestModelRelayDisconnectClosesBlockedHostStream(t *testing.T) {
 	case <-closed:
 	case <-time.After(2 * time.Second):
 		t.Fatal("provider stream did not close after the HTTP client disconnected")
+	}
+}
+
+func TestProtectedRelayBeforeNonStreamingHostCall(t *testing.T) {
+	const model = "model"
+	original := []byte(protectedFixture)
+	meta := map[string]any{"caller_scope": "one", "request_path": paths[responses]}
+	_, groups := requestSession(model, responses, http.Header{"X-Session-Id": {"s"}}, meta, original)
+	if len(groups) == 0 {
+		t.Fatal("protected input was not admitted")
+	}
+	relay, err := newModelRelay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(relay.stop)
+	var fallbacks atomic.Uint64
+	guard := &replayGuard{original: original, groups: groups, fallbacks: &fallbacks}
+	calls := make(chan hostModelRequest, 3)
+	origin, end, err := relay.begin(context.Background(), executorRequest{Model: model, Format: responses, SourceFormat: responses, HostCallbackID: "cb", Metadata: meta}, guard, func(method string, payload any, into any) *rpcError {
+		if method != hostModelExecute {
+			t.Errorf("unexpected host method %s", method)
+			return &rpcError{HTTPStatus: 500}
+		}
+		calls <- payload.(hostModelRequest)
+		return &rpcError{Code: "provider_limit", Message: "test", HTTPStatus: 429}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(end)
+	for _, tc := range []struct {
+		body   string
+		status int
+	}{
+		{`{"model":"model","input":[],"stream":true}`, 409},
+		{`{"model":"model","input":[]}`, 429},
+		{`{"model":"model","input":[]}`, 409},
+	} {
+		r, err := http.Post(origin+paths[responses], "application/json", strings.NewReader(tc.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Body.Close()
+		if r.StatusCode != tc.status {
+			t.Fatalf("status = %d, want %d", r.StatusCode, tc.status)
+		}
+	}
+	if len(calls) != 1 || fallbacks.Load() != 1 {
+		t.Fatalf("host calls=%d, fallbacks=%d", len(calls), fallbacks.Load())
+	}
+	got := <-calls
+	want, _, err := bindModelBody(original, model)
+	if err != nil || string(got.Body) != string(want) || got.CallerScope != "one" || got.HostCallbackID != "cb" {
+		t.Fatal("full replay or callback binding changed")
 	}
 }

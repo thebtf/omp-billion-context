@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -35,7 +36,16 @@ type modelRelay struct {
 	idle        chan struct{}
 }
 
+type replayGuard struct {
+	original     []byte
+	groups       protectedGroups
+	stream       bool
+	fallbacks    *atomic.Uint64
+	sentOriginal atomic.Bool
+}
+
 type modelTurn struct {
+	guard   *replayGuard
 	ctx     context.Context
 	call    hostCall
 	request hostModelRequest
@@ -107,7 +117,7 @@ func (r *modelRelay) stop() {
 	r.active.Wait()
 }
 
-func (r *modelRelay) begin(ctx context.Context, req executorRequest, call hostCall) (string, func(), error) {
+func (r *modelRelay) begin(ctx context.Context, req executorRequest, guard *replayGuard, call hostCall) (string, func(), error) {
 	path, supported := paths[req.SourceFormat]
 	if !supported || req.SourceFormat != req.Format || req.Model == "" || req.HostCallbackID == "" || call == nil {
 		return "", nil, errors.New("invalid model relay request")
@@ -130,8 +140,9 @@ func (r *modelRelay) begin(ctx context.Context, req executorRequest, call hostCa
 	}
 	turnCtx, cancel := context.WithCancel(ctx)
 	r.turns[endpoint] = modelTurn{
-		ctx:  turnCtx,
-		call: call,
+		guard: guard,
+		ctx:   turnCtx,
+		call:  call,
 		request: hostModelRequest{
 			EntryProtocol:  req.SourceFormat,
 			ExitProtocol:   req.Format,
@@ -195,6 +206,28 @@ func (r *modelRelay) serveHTTP(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		writeModelError(w, &rpcError{Code: "invalid_payload", Message: err.Error(), HTTPStatus: http.StatusBadRequest})
 		return
+	}
+	if guard := turn.guard; guard != nil && guard.sentOriginal.Load() {
+		writeModelError(w, &rpcError{Code: "protected_replay", Message: "original Responses turn already dispatched", HTTPStatus: http.StatusConflict})
+		return
+	}
+	if guard := turn.guard; guard != nil && !guard.groups.intact(request.Body) {
+		// An auxiliary callback can use a different transport. Never replay the
+		// user's original turn as an auxiliary request on that transport.
+		if request.Stream != guard.stream {
+			writeModelError(w, &rpcError{Code: "protected_replay", Message: "unsafe auxiliary Responses callback", HTTPStatus: http.StatusConflict})
+			return
+		}
+		request.Body, request.Stream, err = bindModelBody(guard.original, request.Model)
+		if err != nil || request.Stream != guard.stream {
+			writeModelError(w, &rpcError{Code: "invalid_payload", Message: "invalid original Responses replay", HTTPStatus: http.StatusBadRequest})
+			return
+		}
+		if !guard.sentOriginal.CompareAndSwap(false, true) {
+			writeModelError(w, &rpcError{Code: "protected_replay", Message: "original Responses turn already dispatched", HTTPStatus: http.StatusConflict})
+			return
+		}
+		guard.fallbacks.Add(1)
 	}
 	if ctx.Err() != nil || turn.ctx.Err() != nil {
 		return
