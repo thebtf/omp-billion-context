@@ -75,9 +75,7 @@ func (p *plugin) execute(req executorRequest) (any, *rpcError) {
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", contentType)
-	if session != "" {
-		request.Header.Set("X-Acp-Session", session)
-	}
+	request.Header.Set("X-Acp-Session", session)
 	request.Header.Set("User-Agent", pluginID)
 	request.Header.Set("X-Omp-Bili-Access", running.token)
 	response, err := running.client.Do(request)
