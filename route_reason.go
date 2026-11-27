@@ -140,15 +140,14 @@ func classify(model string, format protocol, headers http.Header, metadata map[s
 	if session == "" {
 		session = body.PromptCacheKey
 	}
-	// Last resort, and only for the Anthropic body shape: that handler strips
-	// custom session headers, so the conversation's own opening turn is the one
-	// stable identity left. Chat Completions keeps requiring an explicit id, so a
-	// caller that sent none is still treated as unscoped and stays uncompressed.
-	if session == "" && format == claude {
-		session = openingTurn(body.Messages)
-	}
+	// No explicit id is not a reason to refuse, and an empty identity cannot be
+	// sent as-is: the engine is shared by every CPA caller, and bili's anonymous
+	// matcher has no caller boundary, so two callers with the same opening would
+	// share compression state. The conversation's opening turn gives the identity
+	// here, and requestSession folds caller, model and protocol into the value it
+	// sends, so the engine can only ever match a request to its own caller.
 	if session == "" {
-		return missingSessionID, ""
+		session = openingTurn(body.Messages)
 	}
 	if !validSession(session) {
 		return unusableSessionID, ""

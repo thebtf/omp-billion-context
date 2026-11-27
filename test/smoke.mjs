@@ -304,11 +304,16 @@ try {
 	await unauthorized.text();
 	assert.equal(requests.length, 0, 'Rejected traffic must not reach the provider');
 
-	const bypass = await call('chat/completions', { model, messages }, { 'x-acp-session': '' });
-	const bypassBody = await bypass.text();
-	assert.equal(bypass.status, 200, bypassBody);
+	// A client that sends no usable session header is still compressed: the
+	// plugin identifies the conversation by its opening turn and keeps it scoped
+	// per caller, model and protocol, so refusing here would leave such a client
+	// uncompressed for good.
+	const anonymous = await call('chat/completions', { model, max_tokens: 1000, messages }, { 'x-acp-session': '' });
+	const anonymousBody = await anonymous.text();
+	assert.equal(anonymous.status, 200, anonymousBody);
 	assert.equal(requests.at(-1).body.model, target);
-	assert.equal(requests.at(-1).body.tools?.length ?? 0, 0);
+	assert(requests.at(-1).body.tools?.some(tool => ['acp_status', 'compress', 'acp_compress'].includes(tool.function?.name ?? tool.name)),
+		'An unidentified conversation must still reach bili, which carries its own tools');
 	const account = requests.at(-1).auth;
 	assert([upstreamKey, 'synthetic-cpa-backup'].some(key => account === `Bearer ${key}`));
 

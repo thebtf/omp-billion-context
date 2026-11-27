@@ -41,8 +41,8 @@ func (p *plugin) execute(req executorRequest) (any, *rpcError) {
 	if len(original) == 0 {
 		original = req.Payload
 	}
-	session := requestSession(req.Model, req.SourceFormat, req.Headers, req.Metadata, original)
-	if path == "" || req.SourceFormat != req.Format || req.Alt != "" || session == "" || !json.Valid(req.Payload) {
+	session, eligible := requestSession(req.Model, req.SourceFormat, req.Headers, req.Metadata, original)
+	if !eligible || path == "" || req.SourceFormat != req.Format || req.Alt != "" || !json.Valid(req.Payload) {
 		return nil, &rpcError{Code: "unsupported_request", Message: "request cannot be compressed safely", HTTPStatus: http.StatusBadRequest}
 	}
 	timeout, contentType := nonStreamTimeout, "application/json"
