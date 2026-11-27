@@ -190,23 +190,30 @@
 				window.addEventListener('pageshow', event => {
 					if (event.persisted) location.reload();
 				});
-				// Locking in one tab must revoke the live key everywhere; the
-				// storage event is the only signal the other tabs receive.
-				window.addEventListener('storage', event => {
-					if (event.key !== savedKey || event.newValue !== null) return;
-					key = '';
-					location.reload();
-				});
 			}
 
-			async function open(key) {
+			// Locking in one tab must revoke the live key everywhere, including an
+			// open that is still awaiting CPA. This listener is installed before any
+			// open starts, so a pending request cannot restore the key afterwards.
+			window.addEventListener('storage', event => {
+				if (event.key !== savedKey || event.newValue !== null) return;
+				openGeneration++;
+				key = '';
+				location.reload();
+			});
+
+			async function open(candidate) {
+				const generation = ++openGeneration;
 				input.value = '';
 				input.removeAttribute('aria-invalid');
 				button.disabled = true;
 				progress.hidden = false;
 				status.textContent = 'Opening the bili WebUI…';
 				try {
-					const response = await read(root, key, AbortSignal.timeout(35000));
+					const response = await read(root, candidate, AbortSignal.timeout(35000));
+					// A lock in another tab wins over an open already in flight,
+					// otherwise this tab would store the cleared key again.
+					if (generation !== openGeneration) return;
 					if (denied(response)) {
 						clearSavedKey();
 						input.setAttribute('aria-invalid', 'true');
@@ -215,13 +222,16 @@
 						status.textContent = 'Could not open the bili WebUI (HTTP ' + response.status + '). Try again.';
 					} else {
 						const html = await response.text();
-						try {localStorage.setItem(savedKey, key);} catch { }
-						showNativeUI(html, key);
+						if (generation !== openGeneration) return;
+						try {localStorage.setItem(savedKey, candidate);} catch { }
+						showNativeUI(html, candidate);
 						return;
 					}
 				} catch {
+					if (generation !== openGeneration) return;
 					status.textContent = 'Could not connect to the bili WebUI. Try again.';
 				}
+				if (generation !== openGeneration) return;
 				progress.hidden = true;
 				button.disabled = false;
 				input.focus();
@@ -232,6 +242,7 @@
 				if (!button.disabled) open(input.value);
 			});
 			let key;
+			let openGeneration = 0;
 			try {key = localStorage.getItem(savedKey);} catch { }
 			if (key) open(key);
 		})();
