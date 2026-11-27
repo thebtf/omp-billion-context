@@ -10,8 +10,8 @@ import (
 func TestWithBypassSummaryKeepsBiliPayloadIntact(t *testing.T) {
 	p := newPlugin(nil)
 	defer p.shutdown()
-	p.skips.record(missingSessionID, time.Unix(0, 0))
-	p.skips.record(otherEndpoint, time.Unix(0, 0))
+	p.skips.record(missingSessionID, chat, time.Unix(0, 0))
+	p.skips.record(otherEndpoint, chat, time.Unix(0, 0))
 
 	out := p.withBypassSummary([]byte(`{"version":"0.1.216","overview":{"requests":4},"notices":[]}`))
 	var decoded struct {
@@ -54,7 +54,7 @@ func TestWithBypassSummaryLeavesUnknownPayloadsAlone(t *testing.T) {
 func TestBypassSummaryRouteReturnsCounters(t *testing.T) {
 	p := newPlugin(nil)
 	defer p.shutdown()
-	p.skips.record(missingCallerScope, time.Unix(0, 0))
+	p.skips.record(missingCallerScope, chat, time.Unix(0, 0))
 	raw, err := json.Marshal(managementRequest{Method: http.MethodGet, Path: "/v0/management" + webUIRoute, Query: map[string][]string{"target": {innerRoute}}})
 	if err != nil {
 		t.Fatal(err)

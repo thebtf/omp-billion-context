@@ -22,7 +22,7 @@ func TestClaudeRequestsAreEligible(t *testing.T) {
 		{"agent session", http.Header{"Agent-Session-Id": {"s-1"}}, compressible},
 		{"claude session", http.Header{"X-Claude-Code-Session-Id": {"s-2"}}, compressible},
 		{"conversation id", http.Header{"X-Conversation-Id": {"s-3"}}, compressible},
-		{"no session", http.Header{}, missingSessionID},
+		{"no session", http.Header{}, compressible},
 		{"wrong endpoint", http.Header{"Agent-Session-Id": {"s"}}, otherEndpoint},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -38,6 +38,21 @@ func TestClaudeRequestsAreEligible(t *testing.T) {
 				t.Fatal("an eligible request must carry its session id")
 			}
 		})
+	}
+}
+
+func TestClaudeWithoutHeadersUsesTheOpeningTurn(t *testing.T) {
+	// The Anthropic handler strips custom session headers, so the opening turn is
+	// the only identity left. It must stay stable while the conversation grows.
+	metadata := map[string]any{"caller_scope": "owner", "request_path": paths[claude]}
+	first := []byte(`{"model":"m","messages":[{"role":"user","content":"start here"}],"max_tokens":1000}`)
+	later := []byte(`{"model":"m","messages":[{"role":"user","content":"start here"},{"role":"assistant","content":"ok"},{"role":"user","content":"more"}],"max_tokens":1000}`)
+	reason, session := classify("model", claude, http.Header{}, metadata, first)
+	if reason != compressible || session == "" {
+		t.Fatalf("classify = %q, %q", reason, session)
+	}
+	if again, laterSession := classify("model", claude, http.Header{}, metadata, later); again != compressible || laterSession != session {
+		t.Fatalf("the identity must not change as the conversation grows: %q %q vs %q", again, laterSession, session)
 	}
 }
 

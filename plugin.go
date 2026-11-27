@@ -218,7 +218,7 @@ func (p *plugin) handle(method string, raw []byte) (any, *rpcError) {
 			reason, _ = classify(req.RequestedModel, req.SourceFormat, req.Headers, req.Metadata, req.Body)
 		}
 		if reason != compressible {
-			p.reportSkip(reason, req.RequestedModel)
+			p.reportSkip(reason, req.SourceFormat, req.RequestedModel)
 			return routeResponse{}, nil
 		}
 		return routeResponse{Handled: true, TargetKind: "self"}, nil

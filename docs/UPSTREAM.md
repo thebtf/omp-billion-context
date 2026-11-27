@@ -16,7 +16,8 @@ match the lock file.
 | `bili start --config <file> --no-auto-update --no-passthrough`, `host`/`port`/`upstream`/`logFile`/`mitm` keys | `runtime.go` engine launch | Engine does not start; the smoke test fails at `/__bili/health` |
 | One listening port, `BILI_STRICT_PORT` | `runtime.go` | Port race; smoke fails before any model call |
 | `GET /__bili/health` returning `{"ok":true}` | `waitForEngine` | Startup never reports ready; bounded failure inside 20 s |
-| `POST /bili/<origin><path>` for `chat` and `responses` | `forward.go` `execute` | Compression silently stops; `skip_report.go` counters stay at zero while requests succeed |
+| `POST /bili/<origin><path>` for `chat`, `responses` and `messages` | `forward.go` `execute` | Compression silently stops; `skip_report.go` counters stay at zero while requests succeed |
+| Anthropic bodies with `max_tokens` above 200: below that bili treats the call as a side request and deliberately relays it without injected tools | `test/smoke.mjs`, and any future Anthropic test | An Anthropic request looks uncompressed while bili is behaving correctly |
 | SSE event shape per protocol, `[DONE]` for chat | `stream.go` `forwardStream` | Streaming closes early with a reported error |
 | Documented reads: `overview`, `sessions`, `sessions/{id}/{detail,tree,block-content,message}`, `stats`, `status`, `diagnostics`, `cache-report`, `sessions/{id}/report` | `management.go` `webUIReads`, `sessionReads` | The bridge rejects the target with HTTP 400 instead of proxying |
 | `POST /__bili/notices/dismiss`, `POST /__bili/host-plugins/dismiss` | `webui.html` `dismissPaths` | Notices stop dismissing; the request is answered locally |

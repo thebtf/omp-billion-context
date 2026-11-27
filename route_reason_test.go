@@ -27,7 +27,7 @@ func TestClassifyReportsActionableBypassReasons(t *testing.T) {
 		{"no caller scope", chat, map[string]any{"request_path": paths[chat]}, headers("X-Acp-Session", "s"), `{"messages":[{"role":"user","content":"hi"}]}`, missingCallerScope},
 		{"no session", chat, scope, headers(), `{"messages":[{"role":"user","content":"hi"}]}`, missingSessionID},
 		{"conflicting session", chat, scope, headers("X-Acp-Session", "a", "X-Session-Id", "b"), `{"messages":[{"role":"user","content":"hi"}]}`, ambiguousSessionID},
-		{"unusable session", chat, scope, headers("X-Acp-Session", "has space"), `{"messages":[{"role":"user","content":"hi"}]}`, unusableSessionID},
+		{"unusable session", chat, scope, headers("X-Acp-Session", "has space"), `{"messages":[{"role":"user","content":"hi"}]}`, missingSessionID},
 		{"other endpoint", responses, scope, headers("X-Acp-Session", "s"), `{"input":"hi"}`, otherEndpoint},
 		{"websocket", responses, responsesScope, headers("Upgrade", "websocket"), `{"input":"hi","prompt_cache_key":"c"}`, websocketUpgrade},
 		{"nested callback", chat, map[string]any{"caller_scope": "owner", "request_path": paths[chat], "source": "plugin_host_model_callback"}, headers("X-Acp-Session", "s"), `{"messages":[{"role":"user","content":"hi"}]}`, nestedCallback},

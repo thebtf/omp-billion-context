@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -111,12 +113,21 @@ func classify(model string, format protocol, headers http.Header, metadata map[s
 			return invalidPayload, ""
 		}
 	}
+	// A malformed value is not a distinct failure: it simply carries no
+	// identity, so it is skipped and the caller falls back to the next source.
+	// Only a genuine conflict between usable values blocks compression.
 	session := ""
 	for _, key := range sessionHeaders {
+		distinct := make(map[string]bool, 2)
 		for _, value := range headers.Values(key) {
-			if !validSession(value) {
-				return unusableSessionID, ""
+			if validSession(value) {
+				distinct[value] = true
 			}
+		}
+		if len(distinct) > 1 {
+			return ambiguousSessionID, ""
+		}
+		for value := range distinct {
 			if session != "" && value != session {
 				return ambiguousSessionID, ""
 			}
@@ -128,6 +139,13 @@ func classify(model string, format protocol, headers http.Header, metadata map[s
 	}
 	if session == "" {
 		session = body.PromptCacheKey
+	}
+	// Last resort, and only for the Anthropic body shape: that handler strips
+	// custom session headers, so the conversation's own opening turn is the one
+	// stable identity left. Chat Completions keeps requiring an explicit id, so a
+	// caller that sent none is still treated as unscoped and stays uncompressed.
+	if session == "" && format == claude {
+		session = openingTurn(body.Messages)
 	}
 	if session == "" {
 		return missingSessionID, ""
@@ -149,6 +167,52 @@ func alternateSkipReason(query map[string][]string) skipReason {
 		return compressible
 	}
 	return alternateMode
+}
+
+// openingTurn returns a stable identity built from the first user turn. It is
+// deliberately narrow: only the role and the text of that one message take part,
+// so later growth of the conversation cannot change it.
+func openingTurn(messages []json.RawMessage) string {
+	for _, raw := range messages {
+		var message struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		}
+		if json.Unmarshal(raw, &message) != nil {
+			continue
+		}
+		if message.Role != "user" || len(message.Content) == 0 {
+			continue
+		}
+		text := ""
+		if message.Content[0] == '"' {
+			var value string
+			if json.Unmarshal(message.Content, &value) == nil {
+				text = value
+			}
+		} else if message.Content[0] == '[' {
+			var parts []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(message.Content, &parts) == nil {
+				var builder strings.Builder
+				for _, part := range parts {
+					if part.Type == "text" || part.Type == "input_text" {
+						builder.WriteString(part.Text)
+					}
+				}
+				text = builder.String()
+			}
+		}
+		text = strings.TrimSpace(text)
+		if text == "" {
+			continue
+		}
+		digest := sha256.Sum256([]byte(text))
+		return "turn-" + hex.EncodeToString(digest[:16])
+	}
+	return ""
 }
 
 func describeSkip(reason skipReason) string {
