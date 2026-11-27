@@ -146,8 +146,14 @@ func classify(model string, format protocol, headers http.Header, metadata map[s
 	// share compression state. The conversation's opening turn gives the identity
 	// here, and requestSession folds caller, model and protocol into the value it
 	// sends, so the engine can only ever match a request to its own caller.
+	var opening []json.RawMessage
+	if format == responses && len(body.Input) != 0 && body.Input[0] == '[' {
+		_ = json.Unmarshal(body.Input, &opening)
+	} else {
+		opening = body.Messages
+	}
 	if session == "" {
-		session = openingTurn(body.Messages)
+		session = openingTurn(opening)
 	}
 	if !validSession(session) {
 		return unusableSessionID, ""
@@ -169,8 +175,10 @@ func alternateSkipReason(query map[string][]string) skipReason {
 }
 
 // openingTurn returns a stable identity built from the first user turn. It is
-// deliberately narrow: only the role and the text of that one message take part,
-// so later growth of the conversation cannot change it.
+// deliberately narrow: only the text of that one message takes part, so later
+// growth of the conversation cannot change it. Responses carries the same shape
+// under `input`, and a part there is `input_text` instead of `text`; both are
+// read so an unidentified Responses conversation is not refused outright.
 func openingTurn(messages []json.RawMessage) string {
 	for _, raw := range messages {
 		var message struct {

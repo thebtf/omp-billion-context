@@ -56,6 +56,21 @@ func TestClaudeWithoutHeadersUsesTheOpeningTurn(t *testing.T) {
 	}
 }
 
+func TestResponsesWithoutHeadersUsesTheOpeningTurn(t *testing.T) {
+	// Responses carries the opening under `input` with `input_text` parts. Reading
+	// only `messages` refused every unidentified Responses request.
+	metadata := map[string]any{"caller_scope": "owner", "request_path": paths[responses]}
+	first := []byte(`{"model":"m","input":[{"role":"user","content":[{"type":"input_text","text":"start here"}]}]}`)
+	later := []byte(`{"model":"m","input":[{"role":"user","content":[{"type":"input_text","text":"start here"}]},{"role":"assistant","content":[{"type":"output_text","text":"ok"}]},{"role":"user","content":[{"type":"input_text","text":"more"}]}]}`)
+	reason, session := classify("model", responses, http.Header{}, metadata, first)
+	if reason != compressible || session == "" {
+		t.Fatalf("classify = %q, %q", reason, session)
+	}
+	if again, laterSession := classify("model", responses, http.Header{}, metadata, later); again != compressible || laterSession != session {
+		t.Fatalf("the identity must not change as the conversation grows: %q %q vs %q", again, laterSession, session)
+	}
+}
+
 func TestClaudeRejectsAnEmptyConversation(t *testing.T) {
 	metadata := map[string]any{"caller_scope": "owner", "request_path": paths[claude]}
 	headers := http.Header{"Agent-Session-Id": {"s"}}
