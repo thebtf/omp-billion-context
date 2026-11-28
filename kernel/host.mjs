@@ -38,7 +38,7 @@ function displayTitle(messages) {
 
 export function createHost(directory) {
 	const store = createStore(directory);
-	return async function dispatch(request) {
+	async function perform(request) {
 		if (request.op === 'dashboard') return store.dashboard(request.target);
 		if (request.op === 'configure') return store.configure(request.visibilityMarkers);
 		if (!/^[0-9a-f]{64}$/.test(request.session)) throw new Error('Invalid session ID');
@@ -91,7 +91,15 @@ export function createHost(directory) {
 			record.events = [...record.events.slice(-63), { kind: 'rejected', message: feedback, at: now }];
 			await store.put(record); return { ok: false, feedback };
 		}
-		const { ranges, diagnostics } = parseCompressArgs(request.args);
+		let parsed = parseCompressArgs(request.args);
+		if (parsed.diagnostics.kind === 'content-not-array' && typeof request.args?.content === 'string' && request.args.content.trimStart().startsWith('{')) {
+			let entry;
+			try { entry = JSON.parse(request.args.content) } catch { /* Preserve the parser's rejection for truncated input. */ }
+			if (entry && typeof entry.summary === 'string' && typeof (entry.startId ?? entry.startRef) === 'string' && typeof (entry.endId ?? entry.endRef) === 'string') {
+				parsed = parseCompressArgs({ content: [entry] });
+			}
+		}
+		const { ranges, diagnostics } = parsed;
 		if (!diagnostics.ok || diagnostics.invalidItems || diagnostics.kind !== 'ok' || !ranges.length) return reject('Invalid range. Use content: [{startId:"m00001", endId:"m00006", summary:"..."}] with refs from this conversation.');
 		for (const range of ranges) {
 			if (range.summary.length > config.compress.maxSummaryLength) return reject(`Summary has ${range.summary.length} characters; limit ${config.compress.maxSummaryLength}. Shorten it or split the range.`);
@@ -111,5 +119,14 @@ export function createHost(directory) {
 		await store.put(record);
 		const settings = await store.settings();
 		return { ok: true, feedback, ...(settings.visibilityMarkers ? { marker: '[ACP] ' + feedback } : {}) };
+	}
+	const tails = new Map();
+	return function dispatch(request) {
+		const id = request.session;
+		if (typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(id)) return perform(request);
+		// A caller can lose interest in an IPC result while its durable write is still in flight.
+		const work = (tails.get(id) ?? Promise.resolve()).catch(() => { }).then(() => perform(request));
+		tails.set(id, work);
+		return work.finally(() => { if (tails.get(id) === work) tails.delete(id) });
 	};
 }

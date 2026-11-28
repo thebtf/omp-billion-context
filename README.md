@@ -40,6 +40,8 @@ The first supported request or authenticated dashboard read installs the immutab
 
 The worker owns the persisted compression state under `omp-billion-context/sessions`. Treat the directory as private conversation data. New sessions preserve committed folds across process restarts when the client sends its full history again. Files written by **0.2.9** are not rewritten or deleted. They are shown separately as archived data where readable. An archive entry is not evidence that a new conversation inherited an old fold. Sessions already lost by pre-0.2.9 releases cannot be recovered. To roll back, reselect the old library through CPA; the old runtime and session files are left intact.
 
+A model call whose deadline expires returns a timeout to its client. CPA’s synchronous native callback cannot be forcibly cancelled by the plugin. Until that callback actually returns, another request for the same conversation receives `409 session_busy` instead of starting a duplicate provider call. Other conversations can continue.
+
 A reconfigure with only a priority change does not restart an active turn. Before swapping libraries CPA asks the plugin to quiesce. An active turn or output stream can refuse replacement rather than losing state mid-response.
 
 ## Supported requests

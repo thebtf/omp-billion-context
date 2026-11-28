@@ -11,9 +11,10 @@ import (
 )
 
 type streamedTool struct {
-	name, id string
-	args     strings.Builder
-	complete string
+	name, id  string
+	args      strings.Builder
+	complete  string
+	confirmed bool
 }
 type kernelStream struct {
 	format              protocol
@@ -25,6 +26,8 @@ type kernelStream struct {
 	tools               map[int]*streamedTool
 	hidden              map[int]bool
 	terminal, finished  bool
+	incomplete          bool
+	tail                [][]byte
 	base, chatEnd       map[string]any
 }
 
@@ -77,6 +80,9 @@ func readKernelStream(ctx context.Context, format protocol, clientTools map[stri
 			args = t.args.String()
 		}
 		if privateTool(t.name, s.client) {
+			if s.incomplete || (format == responses && !t.confirmed) {
+				return s.round, kernelError("incomplete_tool_call", "The provider did not complete the compression call; no fold was saved", 422)
+			}
 			s.round.Calls = append(s.round.Calls, kernelToolCall{t.name, toolArgs(args), t.id})
 		} else if s.format == chat {
 			s.round.External = true
@@ -87,7 +93,7 @@ func readKernelStream(ctx context.Context, format protocol, clientTools map[stri
 			}
 		}
 	}
-	if len(s.round.Calls) == 0 || s.round.Visible || s.round.External {
+	if len(s.round.Calls) == 0 || s.round.External {
 		if s.format == chat && s.chatEnd != nil {
 			choice := mapCopy(s.chatEnd)
 			if !s.round.External && len(s.round.Calls) > 0 {
@@ -98,6 +104,11 @@ func readKernelStream(ctx context.Context, format protocol, clientTools map[stri
 			}
 		} else if e := s.flush(); e != nil {
 			return s.round, e
+		}
+		for _, frame := range s.tail {
+			if e := s.publish(frame); e != nil {
+				return s.round, e
+			}
 		}
 	}
 	return s.round, nil
@@ -137,6 +148,7 @@ func (s *kernelStream) consume(chunk []byte) *rpcError {
 	}
 	return nil
 }
+
 func (s *kernelStream) event(data []byte) *rpcError {
 	var o map[string]any
 	d := json.NewDecoder(bytes.NewReader(data))
@@ -195,6 +207,9 @@ func (s *kernelStream) event(data []byte) *rpcError {
 				visible = wireText(delta, "text") != ""
 			}
 		case "message_delta":
+			if wireText(wireObject(o, "delta"), "stop_reason") == "max_tokens" {
+				s.incomplete = true
+			}
 			if !s.round.External && len(s.hidden) > 0 && wireText(wireObject(o, "delta"), "stop_reason") == "tool_use" {
 				wireObject(o, "delta")["stop_reason"] = "end_turn"
 			}
@@ -218,6 +233,9 @@ func (s *kernelStream) event(data []byte) *rpcError {
 					t := s.tool(idx)
 					t.name = name
 					t.id = wireText(item, "call_id")
+					if kind == "response.output_item.done" && wireText(item, "status") == "completed" {
+						t.confirmed = true
+					}
 					if a := wireText(item, "arguments"); a != "" {
 						t.complete = a
 					}
@@ -237,13 +255,26 @@ func (s *kernelStream) event(data []byte) *rpcError {
 		case "response.output_text.delta", "response.refusal.delta":
 			visible = wireText(o, "delta") != ""
 		case "response.completed", "response.incomplete":
+			s.incomplete = kind == "response.incomplete"
 			terminal = true
 			res := wireObject(o, "response")
 			if a, ok := res["output"].([]any); ok {
 				out := make([]any, 0, len(a))
-				for _, v := range a {
+				for index, v := range a {
 					m, _ := v.(map[string]any)
 					if wireText(m, "type") == "function_call" && privateTool(wireText(m, "name"), s.client) {
+						tool := s.tool(index)
+						tool.name = wireText(m, "name")
+						tool.id = wireText(m, "call_id")
+						s.hidden[index] = true
+						if args := wireText(m, "arguments"); args != "" {
+							tool.complete = args
+						}
+						if wireText(m, "status") == "completed" {
+							tool.confirmed = true
+						} else if wireText(m, "status") != "" {
+							tool.confirmed = false
+						}
 						continue
 					}
 					out = append(out, v)
@@ -268,8 +299,13 @@ func (s *kernelStream) event(data []byte) *rpcError {
 	}
 	b, _ := json.Marshal(o)
 	frame := sseFrame{event: kind, data: b}
-	return s.send(frame.eventPayload(kind), visible)
+	wire := frame.eventPayload(kind)
+	if terminal || (s.format == claude && kind == "message_delta") {
+		return s.keepTail(wire)
+	}
+	return s.send(wire, visible)
 }
+
 func (s *kernelStream) reindex(o map[string]any, field string, index int) {
 	n := index
 	for i := range s.hidden {
@@ -279,16 +315,21 @@ func (s *kernelStream) reindex(o map[string]any, field string, index int) {
 	}
 	o[field] = n
 }
+
 func (s *kernelStream) tool(i int) *streamedTool {
 	if s.tools[i] == nil {
 		s.tools[i] = &streamedTool{}
 	}
 	return s.tools[i]
 }
+
 func (s *kernelStream) chatEvent(o map[string]any) *rpcError {
 	choices, _ := o["choices"].([]any)
 	if len(choices) == 0 {
 		data, _ := json.Marshal(o)
+		if o["usage"] != nil {
+			return s.keepTail(data)
+		}
 		return s.send(data, false)
 	}
 	choice, _ := choices[0].(map[string]any)
@@ -315,6 +356,7 @@ func (s *kernelStream) chatEvent(o map[string]any) *rpcError {
 	finish := wireText(choice, "finish_reason")
 	if finish != "" {
 		s.finished = true
+		s.incomplete = finish == "length" || finish == "content_filter"
 		s.chatEnd = mapCopy(choice)
 		s.chatEnd["delta"] = map[string]any{}
 		choice["finish_reason"] = nil
@@ -326,6 +368,7 @@ func (s *kernelStream) chatEvent(o map[string]any) *rpcError {
 	b, _ := json.Marshal(o)
 	return s.send(b, visible)
 }
+
 func (s *kernelStream) send(data []byte, visible bool) *rpcError {
 	if visible {
 		s.round.Visible = true
@@ -340,6 +383,7 @@ func (s *kernelStream) send(data []byte, visible bool) *rpcError {
 	s.pending = append(s.pending, data)
 	return nil
 }
+
 func (s *kernelStream) publish(b []byte) *rpcError {
 	if e := s.flush(); e != nil {
 		return e
@@ -349,6 +393,7 @@ func (s *kernelStream) publish(b []byte) *rpcError {
 	}
 	return nil
 }
+
 func (s *kernelStream) flush() *rpcError {
 	for _, b := range s.pending {
 		if err := s.emit(b); err != nil {
@@ -364,11 +409,13 @@ func wireObject(m map[string]any, key string) map[string]any {
 	v, _ := m[key].(map[string]any)
 	return v
 }
+
 func wireIndex(m map[string]any, key string) int {
 	n, _ := m[key].(json.Number)
 	i, _ := strconv.Atoi(string(n))
 	return i
 }
+
 func mapCopy(m map[string]any) map[string]any {
 	r := make(map[string]any, len(m))
 	for k, v := range m {
@@ -376,6 +423,7 @@ func mapCopy(m map[string]any) map[string]any {
 	}
 	return r
 }
+
 func (s *kernelStream) chatBase(o map[string]any) {
 	if s.base != nil {
 		return
@@ -384,9 +432,19 @@ func (s *kernelStream) chatBase(o map[string]any) {
 	delete(s.base, "choices")
 	delete(s.base, "usage")
 }
+
 func (s *kernelStream) chatFrame(choice any) []byte {
 	o := mapCopy(s.base)
 	o["choices"] = []any{choice}
 	b, _ := json.Marshal(o)
 	return b
+}
+
+func (s *kernelStream) keepTail(frame []byte) *rpcError {
+	s.buffered += len(frame)
+	if s.buffered > maxSSEFrameBytes {
+		return kernelError("invalid_stream", "Model stream trailer too large", 502)
+	}
+	s.tail = append(s.tail, frame)
+	return nil
 }

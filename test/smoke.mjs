@@ -37,6 +37,7 @@ let summaryMode;
 let requestedFold = false;
 let repair;
 let streamTail;
+let preambleProbe = false;
 
 const upstream = createServer(async (req, res) => {
 	try {
@@ -55,7 +56,7 @@ const upstream = createServer(async (req, res) => {
 			const attempt = ++repair.calls;
 			if (attempt <= 2) {
 				const summary = attempt === 1 && repair.kind === 'length' ? 'x'.repeat(21150) : foldSummary;
-				const content = attempt === 1 && repair.kind === 'format' ? 'invalid range header' : JSON.stringify([{ startId: 'm00001', endId: 'm00004', summary }]);
+				const content = attempt === 1 && repair.kind === 'format' ? 'invalid range header' : JSON.stringify({ startId: 'm00001', endId: 'm00004', summary });
 				const tool = { id: `call_repair_${attempt}`, type: 'function', function: { name: 'compress', arguments: JSON.stringify({ content }) } };
 				res.writeHead(200, { 'content-type': 'application/json' });
 				return res.end(JSON.stringify({ ...base, object: 'chat.completion', usage: { prompt_tokens: 100, prompt_tokens_details: { cached_tokens: 80 }, completion_tokens: 1, total_tokens: 101 }, choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls: [tool] }, finish_reason: 'tool_calls' }] }));
@@ -63,7 +64,7 @@ const upstream = createServer(async (req, res) => {
 		}
 		if (summaryMode && body.tools?.length && JSON.stringify(body.messages).length > 750000) {
 			res.writeHead(400, { 'content-type': 'application/json' });
-			return res.end(JSON.stringify({ error: { code: 'context_length_exceeded', type: 'invalid_request_error', message: 'The request exceeds the context window.' } }));
+			return res.end(JSON.stringify({ error: { type: 'invalid_request_error', message: 'prompt is too long: synthetic history exceeds the model limit' } }));
 		}
 		if (body.stream) {
 			res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -77,13 +78,15 @@ const upstream = createServer(async (req, res) => {
 				}
 				return res.end('data: [DONE]\n\n');
 			}
-			if (!requestedFold && JSON.stringify(body.messages).includes(foldMarker)) {
+			if (preambleProbe || (!requestedFold && JSON.stringify(body.messages).includes(foldMarker))) {
+				preambleProbe = false;
 				requestedFold = true;
 				const argumentsJSON = JSON.stringify({ content: [{ startId: 'm00001', endId: 'm00004', summary: foldSummary }] });
 				const tool = { index: 0, id: 'call_smoke', type: 'function', function: { name: 'compress', arguments: argumentsJSON } };
 				const response = { ...base, object: 'chat.completion.chunk', choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [tool] }, finish_reason: null }] };
 				const completed = { ...base, object: 'chat.completion.chunk', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] };
-				return res.end(`data: ${JSON.stringify(response)}\n\ndata: ${JSON.stringify(completed)}\n\ndata: [DONE]\n\n`);
+				const preamble = { ...base, object: 'chat.completion.chunk', choices: [{ index: 0, delta: { role: 'assistant', content: 'Preparing the fold. ' }, finish_reason: null }] };
+				return res.end(`data: ${JSON.stringify(preamble)}\n\ndata: ${JSON.stringify(response)}\n\ndata: ${JSON.stringify(completed)}\n\ndata: [DONE]\n\n`);
 			}
 			res.write(`data: ${JSON.stringify({ ...base, object: 'chat.completion.chunk', choices: [{ index: 0, delta: { role: 'assistant', content: 'smoke-ok' }, finish_reason: null }] })}\n\n`);
 			if (streamTail) await streamTail;
@@ -505,6 +508,8 @@ try {
 	const foldedText = await folded.text();
 	assert.equal(folded.status, 200, foldedText);
 	assert.match(foldedText, /smoke-ok/);
+	assert.match(foldedText, /Preparing the fold/);
+	assert.equal((foldedText.match(/\[DONE\]/g) ?? []).length, 1);
 	assert(!foldedText.includes('[ACP]'), 'Disabling notifications must keep markers out of client output');
 	assert(!foldedText.includes('call_smoke'), 'The client must not execute the compression tool');
 	assert(requestedFold);
@@ -565,11 +570,21 @@ try {
 		repair = undefined;
 	}
 	assert.equal((await setMarkers(false)).status, 200);
+	for (const [path, body, endType] of [['messages', { messages: history, max_tokens: 1200 }, 'message_stop'], ['responses', { input: history }, 'response.completed']]) {
+		preambleProbe = true;
+		const reply = await call(path, { model, stream: true, ...body }, { 'x-acp-session': 'prelude-' + path }); const output = await reply.text();
+		assert.equal(reply.status, 200, output); assert.match(output, /Preparing the fold/); assert.match(output, /smoke-ok/); assert(!output.includes('call_smoke'));
+		const frames = output.split(/\r?\n/).filter(x => x.startsWith('data: {')).map(x => JSON.parse(x.slice(6)));
+		assert.equal(frames.filter(x => x.type === endType).length, 1, 'Only the final round may close ' + path);
+		assert.equal(frames.filter(x => x.type === (path === 'messages' ? 'message_start' : 'response.created')).length, 1, 'All rounds share one envelope');
+		console.log(`${path}: visible preamble, private fold, final answer, one client envelope`);
+	}
 	const cacheStats = (await (await readWebUI('/__bili/overview')).json()).cache;
 	assert(cacheStats.reported > 0 && cacheStats.reported <= cacheStats.requests);
 	assert(cacheStats.readTokens > 0 && cacheStats.ratio > 0 && cacheStats.ratio <= 1);
 	assert.equal(cacheStats.beforeFold?.ratio, 0.8, JSON.stringify(cacheStats));
 	assert.equal(cacheStats.afterFold?.ratio, 0.4, JSON.stringify(cacheStats));
+	console.log(JSON.stringify({ fixture: 'provider-cache', beforeFold: cacheStats.beforeFold.ratio, afterFold: cacheStats.afterFold.ratio, reported: cacheStats.reported, attempts: cacheStats.requests }));
 	console.log('The fixture reported cache usage before and after an actual fold; missing reports are not cache misses');
 
 	async function eventually(check, message, milliseconds = 10000) {

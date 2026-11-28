@@ -6,46 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
-	"sync"
 )
-
-type sessionTurns struct {
-	mu    sync.Mutex
-	slots map[string]*turnSlot
-}
-type turnSlot struct {
-	token chan struct{}
-	refs  int
-}
-
-func (t *sessionTurns) lock(ctx context.Context, id string) (func(), error) {
-	t.mu.Lock()
-	if t.slots == nil {
-		t.slots = make(map[string]*turnSlot)
-	}
-	s := t.slots[id]
-	if s == nil {
-		s = &turnSlot{token: make(chan struct{}, 1)}
-		t.slots[id] = s
-	}
-	s.refs++
-	t.mu.Unlock()
-	drop := func() {
-		t.mu.Lock()
-		s.refs--
-		if s.refs == 0 {
-			delete(t.slots, id)
-		}
-		t.mu.Unlock()
-	}
-	select {
-	case s.token <- struct{}{}:
-		return func() { <-s.token; drop() }, nil
-	case <-ctx.Done():
-		drop()
-		return nil, ctx.Err()
-	}
-}
 
 type kernelToolCall struct {
 	Name string
@@ -92,6 +53,8 @@ func toolArgs(raw any) json.RawMessage {
 	return b
 }
 
+var errUnfinishedPrivate = errors.New("provider did not complete the private tool call")
+
 func kernelJSON(format protocol, data []byte, client map[string]bool, marker string) (kernelRound, []byte, error) {
 	var msg map[string]any
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -101,6 +64,7 @@ func kernelJSON(format protocol, data []byte, client map[string]bool, marker str
 	}
 	r := kernelRound{}
 	changed := false
+	unfinished := false
 	str := func(o map[string]any, key string) string { s, _ := o[key].(string); return s }
 	prefix := func(o map[string]any, key string) {
 		if text, ok := o[key].(string); ok && text != "" {
@@ -141,6 +105,9 @@ func kernelJSON(format protocol, data []byte, client map[string]bool, marker str
 				}
 			}
 			if privateTool(name, client) {
+				if kind == responses && (str(msg, "status") != "completed" || (str(o, "status") != "" && str(o, "status") != "completed")) {
+					unfinished = true
+				}
 				r.Calls = append(r.Calls, kernelToolCall{name, toolArgs(args), id})
 				changed = true
 				continue
@@ -160,17 +127,27 @@ func kernelJSON(format protocol, data []byte, client map[string]bool, marker str
 			m, _ := o["message"].(map[string]any)
 			prefix(m, "content")
 			if calls, ok := m["tool_calls"].([]any); ok {
+				before := len(r.Calls)
 				m["tool_calls"] = filter(calls, chat)
+				if len(r.Calls) > before && (str(o, "finish_reason") == "length" || str(o, "finish_reason") == "content_filter") {
+					unfinished = true
+				}
 			}
 		}
 	case claude:
 		if content, ok := msg["content"].([]any); ok {
 			msg["content"] = filter(content, claude)
+			if len(r.Calls) > 0 && str(msg, "stop_reason") == "max_tokens" {
+				unfinished = true
+			}
 		}
 	case responses:
 		if output, ok := msg["output"].([]any); ok {
 			msg["output"] = filter(output, responses)
 		}
+	}
+	if unfinished {
+		return kernelRound{}, nil, errUnfinishedPrivate
 	}
 	if !changed {
 		return r, data, nil
@@ -188,7 +165,7 @@ func isOverflow(f *rpcError) bool {
 		return false
 	}
 	s := strings.ToLower(f.Code + " " + f.Message)
-	return (f.HTTPStatus == 400 || f.HTTPStatus == 413 || f.HTTPStatus == 422) && (strings.Contains(s, "context_length") || strings.Contains(s, "context window") || strings.Contains(s, "context length") || strings.Contains(s, "context_window"))
+	return (f.HTTPStatus == 400 || f.HTTPStatus == 413 || f.HTTPStatus == 422) && (strings.Contains(s, "context_length") || strings.Contains(s, "context window") || strings.Contains(s, "context length") || strings.Contains(s, "context_window") || strings.Contains(s, "prompt is too long"))
 }
 
 type kernelTurn struct {
@@ -207,6 +184,7 @@ func (t *kernelTurn) request(body []byte, stream bool) hostModelRequest {
 }
 
 func (t *kernelTurn) run(ctx context.Context, emit func([]byte) error) ([]byte, *rpcError) {
+	output := continuationStream{format: t.req.Format, emit: emit}
 	feedback, marker, phase := "", "", "turn"
 	failures := map[string]bool{}
 	preflight := false
@@ -228,6 +206,9 @@ func (t *kernelTurn) run(ctx context.Context, emit func([]byte) error) ([]byte, 
 		if err != nil || stream != t.req.Stream {
 			return nil, kernelError("invalid_projection", "Compression changed the request transport", 502)
 		}
+		if err := ctx.Err(); err != nil {
+			return nil, sidecarFailure(err)
+		}
 		call := t.p.cacheObserved(ctx, t.session, t.req.Format, phase, t.p.call)
 		req := t.request(bound, stream)
 		var res hostModelResponse
@@ -237,6 +218,7 @@ func (t *kernelTurn) run(ctx context.Context, emit func([]byte) error) ([]byte, 
 		if stream {
 			failure = call(hostModelExecuteStream, req, &res)
 			if failure == nil && res.StreamID != "" && res.StatusCode >= 200 && res.StatusCode < 300 {
+				deliver := output.begin()
 				round, failure = readKernelStream(ctx, t.req.Format, t.client, call, res.StreamID, func(frame []byte) error {
 					if marker != "" {
 						var used bool
@@ -245,7 +227,7 @@ func (t *kernelTurn) run(ctx context.Context, emit func([]byte) error) ([]byte, 
 							marker = ""
 						}
 					}
-					return emit(frame)
+					return deliver(frame)
 				})
 			} else if failure == nil {
 				failure = providerFailure(res)
@@ -258,7 +240,11 @@ func (t *kernelTurn) run(ctx context.Context, emit func([]byte) error) ([]byte, 
 			if failure == nil {
 				round, payload, err = kernelJSON(t.req.Format, res.Body, t.client, marker)
 				if err != nil {
-					failure = kernelError("invalid_response", "CPA returned an invalid model response", 502)
+					if errors.Is(err, errUnfinishedPrivate) {
+						failure = kernelError("incomplete_tool_call", "The provider did not complete the compression call; no fold was saved", 422)
+					} else {
+						failure = kernelError("invalid_response", "CPA returned an invalid model response", 502)
+					}
 				}
 			}
 		}
@@ -306,10 +292,13 @@ func (t *kernelTurn) run(ctx context.Context, emit func([]byte) error) ([]byte, 
 			}
 			receipts = append(receipts, reply.Feedback)
 		}
-		if round.External || (stream && round.Visible) {
+		if round.External {
 			return payload, nil
 		}
 		feedback = strings.Join(receipts, "\n")
+		if stream && round.Visible {
+			feedback += " Continue your answer after the text already shown to the user; do not repeat the preamble."
+		}
 	}
 	return nil, kernelError("compression_limit", "Compression did not converge; no further model request was sent", 422)
 }

@@ -17,6 +17,14 @@ const (
 )
 
 func (p *plugin) execute(req executorRequest) (any, *rpcError) {
+	timeout := nonStreamTimeout
+	if req.Stream {
+		timeout = streamTimeout
+	}
+	return p.executeWithTimeout(req, timeout)
+}
+
+func (p *plugin) executeWithTimeout(req executorRequest, timeout time.Duration) (any, *rpcError) {
 	original := req.OriginalRequest
 	if len(original) == 0 {
 		original = req.Payload
@@ -37,26 +45,17 @@ func (p *plugin) execute(req executorRequest) (any, *rpcError) {
 			return nil, kernelError("unsupported_request", "Incompatible Responses execution payload", 400)
 		}
 	}
-	timeout := nonStreamTimeout
-	if req.Stream {
-		timeout = streamTimeout
-	}
 	ctx, cancel := context.WithTimeout(p.ctx, timeout)
 	unlock, err := p.turns.lock(ctx, session)
 	if err != nil {
 		cancel()
+		if errors.Is(err, errPreviousTurnPending) {
+			return nil, kernelError("session_busy", "Previous CPA model call has not returned; its outcome is unknown. No new request was sent.", http.StatusConflict)
+		}
 		return nil, sidecarFailure(err)
 	}
 	finish := func() { unlock(); cancel() }
 	turn := kernelTurn{p: p, req: req, session: session, groups: groups, client: toolNames(req.Payload), original: req.Payload}
-	if !req.Stream {
-		defer finish()
-		payload, f := turn.run(ctx, nil)
-		if f != nil {
-			return nil, f
-		}
-		return executorResponse{Payload: payload, Headers: http.Header{"Content-Type": {"application/json"}}}, nil
-	}
 	p.streamMu.Lock()
 	if p.ctx.Err() != nil {
 		p.streamMu.Unlock()
@@ -69,18 +68,42 @@ func (p *plugin) execute(req executorRequest) (any, *rpcError) {
 	}
 	p.streamCount++
 	p.streamMu.Unlock()
+	// A native host callback cannot be preempted. Its owner keeps the slot and the generation alive even if its client deadline expires.
+	complete := func() {
+		finish()
+		p.streamMu.Lock()
+		p.streamCount--
+		if p.streamCount == 0 {
+			close(p.streamIdle)
+		}
+		p.streamMu.Unlock()
+		p.streams.Done()
+	}
+	if !req.Stream {
+		type outcome struct {
+			payload []byte
+			failure *rpcError
+		}
+		result := make(chan outcome, 1)
+		go func() { defer complete(); body, f := turn.run(ctx, nil); result <- outcome{body, f} }()
+		var got outcome
+		select {
+		case got = <-result:
+		case <-ctx.Done():
+			select {
+			case got = <-result:
+			default:
+				return nil, sidecarFailure(ctx.Err())
+			}
+		}
+		if got.failure != nil {
+			return nil, got.failure
+		}
+		return executorResponse{Payload: got.payload, Headers: http.Header{"Content-Type": {"application/json"}}}, nil
+	}
 	ready := make(chan *rpcError, 1)
 	go func() {
-		defer finish()
-		defer func() {
-			p.streamMu.Lock()
-			p.streamCount--
-			if p.streamCount == 0 {
-				close(p.streamIdle)
-			}
-			p.streamMu.Unlock()
-			p.streams.Done()
-		}()
+		defer complete()
 		started := false
 		_, f := turn.run(ctx, func(chunk []byte) error {
 			if !started {
@@ -112,7 +135,15 @@ func (p *plugin) execute(req executorRequest) (any, *rpcError) {
 		}
 		return streamResponse{Headers: http.Header{"Content-Type": {"text/event-stream"}}}, nil
 	case <-ctx.Done():
-		return nil, sidecarFailure(ctx.Err())
+		select {
+		case f := <-ready:
+			if f != nil {
+				return nil, f
+			}
+			return streamResponse{Headers: http.Header{"Content-Type": {"text/event-stream"}}}, nil
+		default:
+			return nil, sidecarFailure(ctx.Err())
+		}
 	}
 }
 

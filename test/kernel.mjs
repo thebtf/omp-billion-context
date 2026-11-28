@@ -21,7 +21,7 @@ for (const format of ['openai', 'claude', 'openai-response']) test(`${format}: f
 	const long = await dispatch({ ...req, op: 'tool', name: 'compress', args: { content: [{ startId: 'm00002', endId: 'm00009', summary: 'x'.repeat(21150) }] } }); assert.equal(long.ok, false); assert.match(long.feedback, /21150.*20000/);
 	await dispatch({ op: 'cache', session, phase: 'turn', usage: { inputTokens: 100, readTokens: 80 } });
 	await dispatch({ op: 'configure', visibilityMarkers: false });
-	const accepted = await dispatch({ ...req, op: 'tool', name: 'compress', args: { content: JSON.stringify([{ startId: 'm00002', endId: 'm00009', summary }]) } });
+	const accepted = await dispatch({ ...req, op: 'tool', name: 'compress', args: { content: JSON.stringify({ startId: 'm00002', endId: 'm00009', summary }) } });
 	assert.equal(accepted.ok, true, accepted.feedback); assert.equal(accepted.marker, undefined);
 	const next = (await prepare()).body; const nextWire = JSON.stringify(next); assert(nextWire.includes(summary));
 	const anchor = (next.input ?? next.messages).find(m => JSON.stringify(m).includes(summary)); assert.equal(anchor.role, 'user', 'A model-written summary cannot become a system or developer instruction'); assert(!nextWire.includes('Evidence_2 '.repeat(20))); assert(nextWire.includes(tail)); assert.equal(next.prompt_cache_key, body.prompt_cache_key);
@@ -45,4 +45,13 @@ test('a damaged unrelated session cannot block a healthy model turn', async t =>
 	await mkdir(join(dir, 'kernel-v1')); const broken = join(dir, 'kernel-v1', other + '.session'); await writeFile(broken, 'incomplete legacy data');
 	const host = createHost(dir); const result = await host({ op: 'prepare', session, format: 'openai', body: makeBody('openai') });
 	assert(result.body.tools.some(item => item.function?.name === 'compress')); assert.equal(await readFile(broken, 'utf8'), 'incomplete legacy data');
+});
+
+
+test('overlapping observations cannot overwrite a confirmed fold for the same session', async t => {
+	await mkdir(root, { recursive: true }); const dir = await mkdtemp(join(root, 'kernel-order-')); t.after(() => rm(dir, { recursive: true, force: true }));
+	const host = createHost(dir); const base = { session, format: 'openai', body: makeBody('openai') }; await host({ ...base, op: 'prepare' });
+	const fold = host({ ...base, op: 'tool', name: 'compress', args: { content: [{ startId: 'm00002', endId: 'm00009', summary }] } });
+	await Promise.all([fold, ...Array.from({ length: 16 }, () => host({ op: 'cache', session, phase: 'turn', usage: { readTokens: 3, inputTokens: 8 } }))]); assert((await fold).ok);
+	const detail = await createHost(dir)({ op: 'dashboard', target: `/__bili/sessions/${session}/detail` }); assert.equal(detail.blocks[0].summary, summary); assert.equal(detail.cache.reported, 16); assert.equal(detail.cache.readTokens, 48);
 });

@@ -31,3 +31,21 @@ func TestResponsesCacheUsesFinalCumulativeUsage(t *testing.T) {
 		t.Fatal(s)
 	}
 }
+
+func TestResponsesCacheWriteAbsentZeroAndMeasured(t *testing.T) {
+	for _, tc := range []struct {
+		detail string
+		want   int64
+	}{{`{}`, -1}, {`{"cache_write_tokens":0}`, 0}, {`{"cache_write_tokens":64}`, 64}} {
+		var u wireUsage
+		u.record([]byte(`{"usage":{"input_tokens":100,"input_tokens_details":` + tc.detail + `}}`))
+		got := u.sample(responses).Write
+		if tc.want < 0 {
+			if got != nil {
+				t.Fatal(*got)
+			}
+		} else if got == nil || *got != tc.want {
+			t.Fatal(tc.detail, got)
+		}
+	}
+}

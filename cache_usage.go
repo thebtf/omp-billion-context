@@ -23,6 +23,7 @@ type wireUsage struct {
 	} `json:"prompt_tokens_details"`
 	InputDetails struct {
 		Cached *int64 `json:"cached_tokens"`
+		Write  *int64 `json:"cache_write_tokens"`
 	} `json:"input_tokens_details"`
 }
 
@@ -42,7 +43,7 @@ func (u *wireUsage) merge(next *wireUsage) {
 		from *int64
 	}{
 		{&u.Input, next.Input}, {&u.Prompt, next.Prompt}, {&u.Read, next.Read}, {&u.Write, next.Write},
-		{&u.PromptDetails.Cached, next.PromptDetails.Cached}, {&u.InputDetails.Cached, next.InputDetails.Cached},
+		{&u.PromptDetails.Cached, next.PromptDetails.Cached}, {&u.InputDetails.Cached, next.InputDetails.Cached}, {&u.InputDetails.Write, next.InputDetails.Write},
 	} {
 		if n := nonnegative(field.from); n != nil {
 			*field.to = n
@@ -55,7 +56,7 @@ func (u wireUsage) sample(format protocol) providerCacheUsage {
 	case chat:
 		return providerCacheUsage{Read: u.PromptDetails.Cached, Input: u.Prompt}
 	case responses:
-		return providerCacheUsage{Read: u.InputDetails.Cached, Input: u.Input}
+		return providerCacheUsage{Read: u.InputDetails.Cached, Write: u.InputDetails.Write, Input: u.Input}
 	case claude:
 		s := providerCacheUsage{Read: u.Read, Write: u.Write}
 		// Anthropic's input_tokens excludes cache reads and cache writes. Do not use a partial denominator.

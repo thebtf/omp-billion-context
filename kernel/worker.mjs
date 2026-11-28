@@ -7,7 +7,7 @@ const dispatch = createHost(process.argv[2]);
 
 async function reply(message) {
 	let line = JSON.stringify(message);
-	if (Buffer.byteLength(line) > limit) line = JSON.stringify({ id: message.id, ok: false, error: 'Kernel result too large' });
+	if (Buffer.byteLength(line) + 1 > limit) line = JSON.stringify({ id: message.id, ok: false, error: 'Kernel result too large' });
 	if (!process.stdout.write(line + '\n')) await once(process.stdout, 'drain');
 }
 
@@ -32,7 +32,7 @@ for await (const data of process.stdin) {
 		const end = newline < 0 ? data.length : newline;
 		const slice = data.subarray(offset, end);
 		size += slice.length;
-		if (size > limit) throw new Error('Kernel input too large');
+		if (size + 1 > limit) throw new Error('Kernel input too large');
 		chunks.push(slice);
 		if (newline < 0) break;
 		if (active.size >= 8) await Promise.race(active);
