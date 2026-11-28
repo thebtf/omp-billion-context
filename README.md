@@ -59,6 +59,8 @@ The plugin handles authenticated HTTP Chat Completions, Responses and Anthropic 
 
 A fold necessarily rewrites part of the prompt. The integration tests observe the provider-side cache key, credential and unchanged prefix across a fold and its next turn. They do not measure a live provider's cache hit rate. CPA's own routing strategy still applies: an actual account switch, expiry or model switch can invalidate a warm cache. Nested model calls may appear as separate traces in LLM Tracing.
 
+For an oversized Anthropic Messages request, bili asks the model to summarize older messages before sending the user's turn. If the normal tier-one summary finishes without visible text, the plugin retries that summary in streaming mode through CPA. It uses only visible text from a completed reply. Hidden reasoning is never substituted for a summary. If neither transport produces a usable summary and bili refuses compression, the plugin reports the failure instead of sending the oversized history to the model.
+
 ### Using server-side bili after omp compaction
 
 Use this optional mode for conversations where a text handoff is acceptable. For workloads that depend on encrypted reasoning across tool calls, keep provider-native compaction. With plugin 0.2.8, a tool call can start on the bili route and continue on the native route with a different prefix. The provider can report `input_transformations: [{type: "reasoning", action: "removed", reason: "prefix_mismatch"}]` even on a successful request. A handoff does not prevent this.

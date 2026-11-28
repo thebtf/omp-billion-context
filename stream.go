@@ -51,6 +51,13 @@ func (p *plugin) forwardStream(req executorRequest, body io.Reader) {
 			_ = json.Compact(&compact, frame.data)
 			frame.data = append(frame.data[:0], compact.Bytes()...)
 		}
+		// bili can commit the stream before compression finishes and then report
+		// the refusal in-band. Forward the frame so the caller sees the stage, but
+		// rebuild it: the text is derived from the provider exchange, and a later
+		// bili version may add fields this plugin has never seen.
+		if refusal, ok := parsePreflightRefusal(frame.data); ok {
+			frame.data = append(frame.data[:0], scrubPreflightFrame(frame.data, refusal)...)
+		}
 		payload, terminal := frame.data, false
 		switch req.Format {
 		case responses:
