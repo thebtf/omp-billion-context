@@ -144,8 +144,7 @@ func releaseRuntimeLock(file *os.File) {
 	_ = file.Close()
 }
 
-// The parent holds the writer lock until its child exits on orderly shutdown.
-// A hard-killed parent may release the lock before its orphan finishes flushing.
+// The child inherits this lease so an orphan flushing after a CPA crash still excludes another writer.
 type sessionStore struct {
 	dir  string
 	lock *os.File
@@ -159,14 +158,29 @@ func claimSessionStore(ctx context.Context, dataRoot string, wait time.Duration)
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
-	lock, err := acquireRuntimeLock(waitCtx, filepath.Join(dataRoot, "sessions.lock"))
-	if err != nil {
-		if ctx.Err() != nil {
+	path := filepath.Join(dataRoot, "sessions.lock")
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		return nil, fmt.Errorf("%w: %v", errSessionStore, err)
+		lock, err := trySessionLease(path)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", errSessionStore, err)
+		}
+		if lock != nil {
+			return &sessionStore{dir: directory, lock: lock}, nil
+		}
+		select {
+		case <-waitCtx.Done():
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("%w: %v", errSessionStore, waitCtx.Err())
+		case <-ticker.C:
+		}
 	}
-	return &sessionStore{dir: directory, lock: lock}, nil
 }
 
 // release hands the directory to the next writer and must run only after the
@@ -178,7 +192,7 @@ func (s *sessionStore) release() {
 	s.once.Do(func() {
 		if lock := s.lock; lock != nil {
 			s.lock = nil
-			releaseRuntimeLock(lock)
+			_ = lock.Close()
 		}
 	})
 }
@@ -496,7 +510,7 @@ func startEngineAt(startupCtx, lifetimeCtx context.Context, dataRoot string) (en
 	if err := startupCtx.Err(); err != nil {
 		return engine{}, &engineStartupError{stage: "start", cause: err}
 	}
-	if err := cmd.Start(); err != nil {
+	if err := startWithSessionLease(cmd, store.lock); err != nil {
 		return engine{}, &engineStartupError{stage: "start", cause: err}
 	}
 	done := make(chan struct{})

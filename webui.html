@@ -215,7 +215,6 @@
 
 				// Keep native links and keyboard navigation when bili replaces the table body.
 				const decorateRows = () => {
-					const historyLabel = document.querySelector('#ses-state option[value="history"]')?.textContent || 'History';
 					for (const body of document.querySelectorAll('#sessions-body, #recent-body')) {
 						for (const anchor of body.querySelectorAll('a.slink')) {
 							if (anchor.dataset.ompDecorated) continue;
@@ -223,16 +222,10 @@
 							const name = anchor.querySelector('.row-title');
 							const handle = anchor.querySelector('.row-id');
 							const cells = anchor.closest('td')?.parentElement?.children || [];
-							const client = cells[1]?.textContent.trim();
-							const upstream = cells[3]?.textContent.trim();
+							const client = body.id === 'sessions-body' ? cells[1]?.textContent.trim() : '';
+							const upstream = body.id === 'sessions-body' ? cells[3]?.textContent.trim() : '';
 							const lines = [name?.textContent, client, upstream, handle?.textContent].filter(Boolean);
 							if (lines.length) anchor.title = lines.join('\n');
-							if (!anchor.querySelector('.badge.live')) {
-								const chip = document.createElement('span');
-								chip.className = 'badge disk';
-								chip.textContent = historyLabel;
-								anchor.insertBefore(chip, handle || null);
-							}
 						}
 					}
 				};

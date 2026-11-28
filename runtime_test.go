@@ -610,3 +610,51 @@ setInterval(() => {}, 1000);
 		t.Fatalf("unexpected shutdown marker: %v", err)
 	}
 }
+
+func TestSessionStoreStaysLockedWhileOrphanFinishes(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("a real Node process is required")
+	}
+	root := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	parent, err := claimSessionStore(ctx, root, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.release()
+	child := exec.CommandContext(ctx, node, "-e", "process.stdin.resume()")
+	configureProcess(child)
+	stdin, err := child.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	if err = startWithSessionLease(child, parent.lock); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- child.Wait(); close(done) }()
+	defer func() { _ = stdin.Close(); <-done }()
+	parent.release()
+	second, err := claimSessionStore(ctx, root, 150*time.Millisecond)
+	if second != nil {
+		second.release()
+		t.Fatal("another writer entered before the child exited")
+	}
+	if !errors.Is(err, errSessionStore) {
+		t.Fatalf("want busy store, got %v", err)
+	}
+	if err = stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := claimSessionStore(ctx, root, time.Second)
+	if err != nil {
+		t.Fatalf("lease not returned on child exit: %v", err)
+	}
+	replacement.release()
+}
