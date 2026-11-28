@@ -170,5 +170,8 @@ func sidecarFailure(err error) *rpcError {
 	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()) {
 		return &rpcError{Code: "sidecar_timeout", Message: "billion-context request timed out", HTTPStatus: http.StatusGatewayTimeout}
 	}
-	return &rpcError{Code: "sidecar_failure", Message: "billion-context request failed", HTTPStatus: http.StatusBadGateway}
+	if errors.Is(err, context.Canceled) {
+		return &rpcError{Code: "turn_canceled", Message: "The local bili turn was canceled before completion was confirmed", HTTPStatus: http.StatusBadGateway}
+	}
+	return &rpcError{Code: "sidecar_failure", Message: "Local bili execution failed before completion was confirmed", HTTPStatus: http.StatusBadGateway}
 }

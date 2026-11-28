@@ -14,9 +14,10 @@ type kernelToolCall struct {
 	ID   string
 }
 type kernelRound struct {
-	Calls    []kernelToolCall
-	External bool
-	Visible  bool
+	Calls        []kernelToolCall
+	External     bool
+	Visible      bool
+	OutputTokens *int64
 }
 
 func privateTool(name string, client map[string]bool) bool {
@@ -129,7 +130,7 @@ func kernelJSON(format protocol, data []byte, client map[string]bool, marker str
 			if calls, ok := m["tool_calls"].([]any); ok {
 				before := len(r.Calls)
 				m["tool_calls"] = filter(calls, chat)
-				if len(r.Calls) > before && (str(o, "finish_reason") == "length" || str(o, "finish_reason") == "content_filter") {
+				if len(r.Calls) > before && str(o, "finish_reason") != "tool_calls" {
 					unfinished = true
 				}
 			}
@@ -137,7 +138,7 @@ func kernelJSON(format protocol, data []byte, client map[string]bool, marker str
 	case claude:
 		if content, ok := msg["content"].([]any); ok {
 			msg["content"] = filter(content, claude)
-			if len(r.Calls) > 0 && str(msg, "stop_reason") == "max_tokens" {
+			if len(r.Calls) > 0 && str(msg, "stop_reason") != "tool_use" {
 				unfinished = true
 			}
 		}
@@ -188,14 +189,41 @@ func (t *kernelTurn) run(ctx context.Context, emit func([]byte) error) ([]byte, 
 	feedback, marker, phase := "", "", "turn"
 	failures := map[string]bool{}
 	preflight := false
+	var options struct {
+		Store *bool `json:"store"`
+	}
+	singleResponse := false
+	if t.req.Stream && t.req.Format == responses {
+		_ = json.Unmarshal(t.original, &options)
+		singleResponse = options.Store == nil || *options.Store
+	}
+	clientTools := t.client
+	if singleResponse {
+		clientTools = map[string]bool{"compress": true, "acp_status": true}
+	}
 	for loop := 0; loop < 8; loop++ {
 		if ctx.Err() != nil {
 			return nil, sidecarFailure(ctx.Err())
 		}
 		fields := map[string]any{"session": t.session, "format": t.req.Format, "body": t.original, "feedback": feedback}
-		var prepared struct{ Body json.RawMessage }
+		if singleResponse {
+			fields["singleResponse"] = true
+		}
+		var prepared struct {
+			Body            json.RawMessage
+			FoldRecommended bool
+		}
 		if err := t.p.kernelCall(ctx, "prepare", fields, &prepared); err != nil {
 			return nil, engineFailure(err)
+		}
+		if singleResponse && prepared.FoldRecommended && !preflight && len(t.groups) == 0 && !t.client["compress"] {
+			preflight = true
+			if f := t.recoverOverflow(ctx); f == nil {
+				phase = "after_fold"
+				continue
+			} else if f.Code != noSafeRange {
+				return nil, f
+			}
 		}
 		fallback := len(t.groups) > 0 && !t.groups.intact(prepared.Body)
 		if fallback {
@@ -219,7 +247,7 @@ func (t *kernelTurn) run(ctx context.Context, emit func([]byte) error) ([]byte, 
 			failure = call(hostModelExecuteStream, req, &res)
 			if failure == nil && res.StreamID != "" && res.StatusCode >= 200 && res.StatusCode < 300 {
 				deliver := output.begin()
-				round, failure = readKernelStream(ctx, t.req.Format, t.client, call, res.StreamID, func(frame []byte) error {
+				round, failure = readKernelStream(ctx, t.req.Format, clientTools, call, res.StreamID, func(frame []byte) error {
 					if marker != "" {
 						var used bool
 						frame, used = withStreamMarker(t.req.Format, frame, marker)
@@ -296,7 +324,10 @@ func (t *kernelTurn) run(ctx context.Context, emit func([]byte) error) ([]byte, 
 			return payload, nil
 		}
 		feedback = strings.Join(receipts, "\n")
-		if stream && round.Visible {
+		if stream && t.req.Format == claude {
+			output.addClaudeUsage(round.OutputTokens)
+		}
+		if stream && output.started {
 			feedback += " Continue your answer after the text already shown to the user; do not repeat the preamble."
 		}
 	}
@@ -309,6 +340,12 @@ func providerFailure(res hostModelResponse) *rpcError {
 	}
 	_ = json.Unmarshal(res.Body, &b)
 	f := kernelError("host_model_response", "CPA could not complete the model request", modelStatus(res.StatusCode))
+	switch res.StatusCode {
+	case 429:
+		return kernelError("rate_limit_error", "The CPA model route returned a rate limit (HTTP 429)", 429)
+	case 502:
+		return kernelError("model_gateway_error", "The CPA model route returned Bad Gateway (HTTP 502)", 502)
+	}
 	if isOverflow(kernelError(b.Error.Code, b.Error.Message, f.HTTPStatus)) {
 		f.Code = "context_length_exceeded"
 		f.Message = "The provider rejected the context length"

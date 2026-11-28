@@ -1,5 +1,5 @@
 import { markFold, observeCache } from './cache.mjs';
-import { createCore, createInitialState, defaultConfig, defaultCountTokens, parseCompressArgs, COMPRESS_TOOL, COMPRESS_TOOL_OPENAI, COMPRESS_TOOL_RESPONSES, ACP_STATUS_TOOL, ACP_STATUS_TOOL_OPENAI, ACP_STATUS_TOOL_RESPONSES } from 'acp-kernel';
+import { createCore, createInitialState, defaultConfig, defaultCountTokens, prune, parseCompressArgs, COMPRESS_TOOL, COMPRESS_TOOL_OPENAI, COMPRESS_TOOL_RESPONSES, ACP_STATUS_TOOL, ACP_STATUS_TOOL_OPENAI, ACP_STATUS_TOOL_RESPONSES } from 'acp-kernel';
 import { openaiToCore, coreToOpenai, responsesToCore, patchResponsesInput, anthropicToCore, coreToAnthropic } from 'acp-kernel/wire';
 import { createStore } from './store.mjs';
 
@@ -78,7 +78,12 @@ export function createHost(directory) {
 			await store.put(record);
 			// The kernel marks summaries as system for its internal pruning pipeline. On the wire they carry conversation data, not instructions.
 			const summaryIds = new Set(turn.state.blocks.map(b => 'acp_summary_' + b.blockId));
-			const projected = turn.messages.map(m => m.role === 'system' && summaryIds.has(m.id) ? { ...m, role: 'user' } : m);
+			const sourceMessages = request.singleResponse ? prune(messages, turn.state) : turn.messages;
+			const projected = sourceMessages.map(m => m.role === 'system' && summaryIds.has(m.id) ? { ...m, role: 'user' } : m);
+			if (request.singleResponse && request.format === 'openai-response') {
+				const body = turn.state.blocks.some(b => b.active) ? { ...request.body, input: patchResponsesInput(decoded, projected) } : request.body;
+				return { body, foldRecommended: turn.nudge?.shouldInject === true && turn.nudge.compressibleRanges?.length > 0 };
+			}
 			return { body: encode(request.format, request.body, decoded, projected, request.feedback, tools) };
 		}
 		if (!tools.some(t => nameOf(t) === request.name)) throw new Error('Tool belongs to the calling client');

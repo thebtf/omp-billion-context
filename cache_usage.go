@@ -42,8 +42,13 @@ func (u *wireUsage) merge(next *wireUsage) {
 		to   **int64
 		from *int64
 	}{
-		{&u.Input, next.Input}, {&u.Prompt, next.Prompt}, {&u.Read, next.Read}, {&u.Write, next.Write},
-		{&u.PromptDetails.Cached, next.PromptDetails.Cached}, {&u.InputDetails.Cached, next.InputDetails.Cached}, {&u.InputDetails.Write, next.InputDetails.Write},
+		{&u.Input, next.Input},
+		{&u.Prompt, next.Prompt},
+		{&u.Read, next.Read},
+		{&u.Write, next.Write},
+		{&u.PromptDetails.Cached, next.PromptDetails.Cached},
+		{&u.InputDetails.Cached, next.InputDetails.Cached},
+		{&u.InputDetails.Write, next.InputDetails.Write},
 	} {
 		if n := nonnegative(field.from); n != nil {
 			*field.to = n
@@ -128,18 +133,24 @@ func (p *plugin) cacheObserved(ctx context.Context, session string, format proto
 		failure := base(method, payload, into)
 		switch method {
 		case hostModelExecute:
-			if response, ok := into.(*hostModelResponse); ok && failure == nil {
+			if response, ok := into.(*hostModelResponse); ok && response != nil && failure == nil {
 				mu.Lock()
 				usage.record(response.Body)
 				mu.Unlock()
 			}
 			commit()
 		case hostModelExecuteStream:
-			if failure != nil {
+			response, ok := into.(*hostModelResponse)
+			if failure != nil || !ok || response == nil || response.StreamID == "" || response.StatusCode < 200 || response.StatusCode >= 300 {
+				if ok && response != nil {
+					mu.Lock()
+					usage.record(response.Body)
+					mu.Unlock()
+				}
 				commit()
 			}
 		case hostModelStreamRead:
-			if chunk, ok := into.(*hostModelStreamChunk); ok {
+			if chunk, ok := into.(*hostModelStreamChunk); ok && chunk != nil {
 				mu.Lock()
 				usage.record(chunk.Payload)
 				mu.Unlock()

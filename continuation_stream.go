@@ -8,13 +8,16 @@ import (
 
 // Several provider turns can make one client turn. Envelopes and content indices belong to the client stream.
 type continuationStream struct {
-	format         protocol
-	emit           func([]byte) error
-	started        bool
-	id             string
-	next, sequence int
-	prior, current []any
-	retained       int
+	priorClaudeRounds   int
+	priorClaudeTokens   int64
+	unknownClaudeTokens bool
+	format              protocol
+	emit                func([]byte) error
+	started             bool
+	id                  string
+	next, sequence      int
+	prior, current      []any
+	retained            int
 }
 
 func (c *continuationStream) begin() func([]byte) error {
@@ -58,6 +61,22 @@ func (c *continuationStream) begin() func([]byte) error {
 				}
 			}
 		case claude:
+			if c.priorClaudeRounds > 0 && kind == "message_delta" {
+				u := wireObject(body, "usage")
+				n, ok := u["output_tokens"].(json.Number)
+				if ok {
+					v, e := n.Int64()
+					if e == nil && v >= 0 && !c.unknownClaudeTokens && v <= int64(^uint64(0)>>1)-c.priorClaudeTokens {
+						u["output_tokens"] = v + c.priorClaudeTokens
+					} else {
+						delete(u, "output_tokens")
+						if len(u) == 0 {
+							delete(body, "usage")
+						}
+					}
+					changed = true
+				}
+			}
 			if kind == "message_start" && continuing {
 				return nil
 			}
@@ -138,4 +157,13 @@ func (c *continuationStream) begin() func([]byte) error {
 		}
 		return c.emit(encoded)
 	}
+}
+
+func (c *continuationStream) addClaudeUsage(tokens *int64) {
+	c.priorClaudeRounds++
+	if tokens == nil || *tokens < 0 || *tokens > int64(^uint64(0)>>1)-c.priorClaudeTokens {
+		c.unknownClaudeTokens = true
+		return
+	}
+	c.priorClaudeTokens += *tokens
 }

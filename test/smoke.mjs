@@ -33,7 +33,7 @@ const foldSummary = 'The earlier test turns discussed workspace setup, model rou
 const preflightModel = 'claude-sonnet-4-5';
 const preflightSummary = 'VISIBLE_PREFLIGHT: Earlier turns selected the synthetic batch size and verified the fixture.';
 const hiddenReasoning = 'SYNTHETIC_REASONING_MUST_NOT_BE_USED_AS_A_SUMMARY';
-let summaryMode;
+let summaryMode, refusalStatus;
 let requestedFold = false;
 let repair;
 let streamTail;
@@ -45,6 +45,11 @@ const upstream = createServer(async (req, res) => {
 		for await (const chunk of req) chunks.push(chunk);
 		const body = JSON.parse(Buffer.concat(chunks));
 		requests.push({ path: req.url, auth: req.headers.authorization, engineToken: req.headers['x-omp-bili-access'], body });
+		if (refusalStatus) {
+			const status = refusalStatus;
+			res.writeHead(status, { 'content-type': 'application/json' });
+			return res.end(JSON.stringify({ error: { code: status === 429 ? 'rate_limit_error' : 'gateway_error', message: 'Unavailable for this synthetic request' } }));
+		}
 		const base = { id: 'chatcmpl-smoke', created: 1, model: body.model };
 		if (body.stream && JSON.stringify(body.messages).includes('TWO_NATIVE_CHOICES')) {
 			res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -460,6 +465,16 @@ try {
 			{ role: 'user', content: 'Start the next turn.' },
 		]
 	};
+	for (const storage of [{}, { store: true }]) {
+		const start = requests.length;
+		const clientTool = { type: 'function', name: 'lookup', parameters: { type: 'object', properties: {} } };
+		const stored = await call('responses', { model, input: messages, tools: [clientTool], stream: true, ...storage }, { 'x-acp-session': 'stored-replay' });
+		const wire = await stored.text(); assert.equal(stored.status, 200, wire);
+		const events = wire.split(/\r?\n/).filter(line => line.startsWith('data: {')).map(line => JSON.parse(line.slice(6)));
+		const created = events.find(e => e.type === 'response.created')?.response.id;
+		assert(created); assert.equal(events.find(e => e.type === 'response.completed')?.response.id, created);
+		assert.equal(requests.length - start, 1); assert.deepEqual(requests.at(-1).body.tools.map(t => t.function?.name ?? t.name), ['lookup']);
+	}
 	const priorSkips = async () => (await (await readWebUI('/bypass')).json()).formats?.['openai-response']?.previous_response_id ?? 0;
 	const beforeDelta = await priorSkips();
 	const protectedReply = await call('responses', protectedInput, { 'x-acp-session': 'protected-responses' });
@@ -553,6 +568,20 @@ try {
 	assert(foldedSessionId);
 	console.log('Bundled bili folded history; CPA preserved the account, cache key and prefix; caller state stayed isolated');
 
+	const largeStoredInput = Array.from({ length: 32 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: (`STORED_HISTORY_${i} `).repeat(2400) }));
+	largeStoredInput.push({ role: 'user', content: 'Return the final answer.' });
+	const storedStart = requests.length;
+	summaryMode = 'json';
+	try {
+		const result = await call('responses', { model, input: largeStoredInput, stream: true, tools: [{ type: 'function', name: 'lookup', parameters: { type: 'object', properties: {} } }] }, { 'x-acp-session': 'stored-under-pressure' });
+		const wire = await result.text(); assert.equal(result.status, 200, wire); assert.match(wire, /smoke-ok/);
+		const seen = requests.slice(storedStart); assert(seen.length > 1 && seen.length <= 9, `Expected bounded summary calls and one visible answer, saw ${seen.length}`);
+		const final = seen.at(-1).body;
+		assert.equal(seen.filter(r => r.body.stream).length, 1); assert.deepEqual(final.tools.map(t => t.function?.name ?? t.name), ['lookup']);
+		assert(JSON.stringify(final.messages).includes(preflightSummary)); assert(JSON.stringify(final.messages).includes('STORED_HISTORY_0 '.repeat(10))); assert(!JSON.stringify(final.messages).includes('STORED_HISTORY_1 '.repeat(10))); assert(JSON.stringify(final.messages).includes('Return the final answer.'));
+		console.log('stored Responses: compacted before a single visible provider answer, retaining the caller’s tool');
+	} finally { summaryMode = undefined; }
+
 	for (const kind of ['format', 'length']) {
 		const notifications = kind === 'length';
 		assert.equal((await setMarkers(notifications)).status, 200);
@@ -570,7 +599,7 @@ try {
 		repair = undefined;
 	}
 	assert.equal((await setMarkers(false)).status, 200);
-	for (const [path, body, endType] of [['messages', { messages: history, max_tokens: 1200 }, 'message_stop'], ['responses', { input: history }, 'response.completed']]) {
+	for (const [path, body, endType] of [['messages', { messages: history, max_tokens: 1200 }, 'message_stop'], ['responses', { input: history, store: false }, 'response.completed']]) {
 		preambleProbe = true;
 		const reply = await call(path, { model, stream: true, ...body }, { 'x-acp-session': 'prelude-' + path }); const output = await reply.text();
 		assert.equal(reply.status, 200, output); assert.match(output, /Preparing the fold/); assert.match(output, /smoke-ok/); assert(!output.includes('call_smoke'));
@@ -786,6 +815,16 @@ try {
 	summaryMode = undefined;
 	console.log('Preflight accepted visible summary text and refused the reasoning-only response without forwarding the original history');
 	assert.deepEqual(await runtimeSnapshot(runtimeParent), originalRuntime, 'Warm requests must leave installed runtime files unchanged');
+	for (const [status, chosen] of [[502, model], [429, preflightModel]]) {
+		const before = requests.length;
+		refusalStatus = status;
+		const reply = await call('messages', { model: chosen, max_tokens: 100, messages: [{ role: 'user', content: 'FIXTURE_MODEL_HTTP_' + status }] }, { 'x-acp-session': 'refused-' + status });
+		const text = await reply.text(); assert.equal(reply.status, status, text);
+		const attempts = requests.slice(before); assert(attempts.length > 0);
+		assert(attempts.every(r => r.body.tools?.length), 'Provider refusal must not launch a summary call');
+		console.log(`CPA returned ${status} to the Anthropic client; no summary was attempted`);
+	}
+	refusalStatus = undefined;
 	await stopCPA(restarted, dataRoot);
 	assert.deepEqual(await engineDirs(), [], 'Both CPA starts must clean their private instances');
 	assert.deepEqual(await runtimeSnapshot(runtimeParent), originalRuntime, 'The installed runtime and its lock remain unchanged after shutdown');

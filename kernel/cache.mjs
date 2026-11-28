@@ -14,7 +14,7 @@ export function observeCache(record, phase, sample) {
 	const stats = record.cacheStats ??= { total: empty(), before: empty(), after: empty() };
 	add(stats.total, sample);
 	if (phase === 'after_fold') add(stats.after, sample);
-	stats.last = phase === 'auxiliary' ? null : sample;
+	if (phase !== 'auxiliary') stats.last = sample;
 }
 
 export function markFold(record) {

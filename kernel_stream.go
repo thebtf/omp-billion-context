@@ -27,6 +27,8 @@ type kernelStream struct {
 	hidden              map[int]bool
 	terminal, finished  bool
 	incomplete          bool
+	stopReason          string
+	tailBytes           int
 	tail                [][]byte
 	base, chatEnd       map[string]any
 }
@@ -80,7 +82,7 @@ func readKernelStream(ctx context.Context, format protocol, clientTools map[stri
 			args = t.args.String()
 		}
 		if privateTool(t.name, s.client) {
-			if s.incomplete || (format == responses && !t.confirmed) {
+			if s.incomplete || (format == responses && !t.confirmed) || (format == chat && s.stopReason != "tool_calls") || (format == claude && s.stopReason != "tool_use") {
 				return s.round, kernelError("incomplete_tool_call", "The provider did not complete the compression call; no fold was saved", 422)
 			}
 			s.round.Calls = append(s.round.Calls, kernelToolCall{t.name, toolArgs(args), t.id})
@@ -207,8 +209,13 @@ func (s *kernelStream) event(data []byte) *rpcError {
 				visible = wireText(delta, "text") != ""
 			}
 		case "message_delta":
-			if wireText(wireObject(o, "delta"), "stop_reason") == "max_tokens" {
-				s.incomplete = true
+			if reason := wireText(wireObject(o, "delta"), "stop_reason"); reason != "" {
+				s.stopReason = reason
+			}
+			if n, ok := wireObject(o, "usage")["output_tokens"].(json.Number); ok {
+				if count, e := n.Int64(); e == nil && count >= 0 {
+					s.round.OutputTokens = &count
+				}
 			}
 			if !s.round.External && len(s.hidden) > 0 && wireText(wireObject(o, "delta"), "stop_reason") == "tool_use" {
 				wireObject(o, "delta")["stop_reason"] = "end_turn"
@@ -356,7 +363,7 @@ func (s *kernelStream) chatEvent(o map[string]any) *rpcError {
 	finish := wireText(choice, "finish_reason")
 	if finish != "" {
 		s.finished = true
-		s.incomplete = finish == "length" || finish == "content_filter"
+		s.stopReason = finish
 		s.chatEnd = mapCopy(choice)
 		s.chatEnd["delta"] = map[string]any{}
 		choice["finish_reason"] = nil
@@ -377,7 +384,7 @@ func (s *kernelStream) send(data []byte, visible bool) *rpcError {
 		return s.publish(data)
 	}
 	s.buffered += len(data)
-	if s.buffered > maxSSEFrameBytes {
+	if s.buffered+s.tailBytes > maxSSEFrameBytes {
 		return kernelError("invalid_stream", "Uncommitted stream prefix too large", 502)
 	}
 	s.pending = append(s.pending, data)
@@ -441,8 +448,8 @@ func (s *kernelStream) chatFrame(choice any) []byte {
 }
 
 func (s *kernelStream) keepTail(frame []byte) *rpcError {
-	s.buffered += len(frame)
-	if s.buffered > maxSSEFrameBytes {
+	s.tailBytes += len(frame)
+	if s.buffered+s.tailBytes > maxSSEFrameBytes {
 		return kernelError("invalid_stream", "Model stream trailer too large", 502)
 	}
 	s.tail = append(s.tail, frame)
