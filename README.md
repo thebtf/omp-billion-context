@@ -15,7 +15,7 @@ plugins:
 ```
 
 > [!IMPORTANT]
-> If you set plugin priorities, give `omp-billion-context` a higher `priority` number than every other model router, including combo-router. Requests handled by another router first can skip compression.
+> If you use other model routers, set `omp-billion-context` to a higher `priority` number than all of them, including combo-router. Equal or unset priorities can let another router handle a request before compression.
 
 No extra model, upstream URL, key, Node.js installation, or background service is required. Keep sending requests to your existing CPA model with the normal CPA client key. Disable the plugin in CPA to stop compressing new requests.
 
