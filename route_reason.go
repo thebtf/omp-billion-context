@@ -14,6 +14,7 @@ type skipReason string
 
 const (
 	compressible       skipReason = "compressible"
+	multipleChoices    skipReason = "multiple_choices"
 	otherEndpoint      skipReason = "other_endpoint"
 	unsupportedFormat  skipReason = "unsupported_format"
 	alternateMode      skipReason = "alternate_mode"
@@ -76,6 +77,7 @@ func classify(model string, format protocol, headers http.Header, metadata map[s
 	}
 	var body struct {
 		Messages           []json.RawMessage `json:"messages"`
+		Choices            json.RawMessage   `json:"n"`
 		Input              json.RawMessage   `json:"input"`
 		PromptCacheKey     string            `json:"prompt_cache_key"`
 		SessionID          string            `json:"session_id"`
@@ -85,6 +87,16 @@ func classify(model string, format protocol, headers http.Header, metadata map[s
 	}
 	if json.Unmarshal(payload, &body) != nil {
 		return invalidPayload, "", nil
+	}
+	if format == chat && len(body.Choices) != 0 && string(body.Choices) != "null" {
+		var n int
+		if json.Unmarshal(body.Choices, &n) != nil || n < 1 {
+			return invalidPayload, "", nil
+		}
+		// Alternatives have independent tool indices but only one durable conversation state.
+		if n > 1 {
+			return multipleChoices, "", nil
+		}
 	}
 	if format == chat && len(body.Messages) == 0 {
 		return emptyConversation, "", nil

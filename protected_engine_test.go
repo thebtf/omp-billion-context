@@ -98,7 +98,7 @@ func TestProtectedBundledFold(t *testing.T) {
 				if turn == 1 {
 					history = append(history, json.RawMessage(`{"role":"assistant","content":"fixture-accepted"}`), json.RawMessage(`{"role":"user","content":"follow-up"}`))
 				}
-				body, _ := json.Marshal(map[string]any{"model": "gpt-5.4", "stream": true, "reasoning": map[string]string{"context": "current_turn"}, "max_output_tokens": 1200, "input": history, "prompt_cache_key": "cache-test"})
+				body, _ := json.Marshal(map[string]any{"model": "gpt-5.4", "stream": true, "store": false, "reasoning": map[string]string{"context": "current_turn"}, "max_output_tokens": 1200, "input": history, "prompt_cache_key": "cache-test"})
 				_, failure := plug.execute(executorRequest{Model: "gpt-5.4", SourceFormat: responses, Format: responses, Stream: true, StreamID: "stream", HostCallbackID: "cb", Payload: body, OriginalRequest: body, Headers: http.Header{"X-Acp-Session": {tc.name}}, Metadata: map[string]any{"caller_scope": "local-test", "request_path": paths[responses]}})
 				if failure != nil {
 					t.Fatal(failure)

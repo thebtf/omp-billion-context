@@ -130,7 +130,7 @@ func TestEngineStartupFailureIsSharedAndTerminal(t *testing.T) {
 	results := make(chan error, callers)
 	for range callers {
 		go func() {
-			_, _, err := p.runningEngine(ctx)
+			_, err := p.runningEngine(ctx)
 			results <- err
 		}()
 	}
@@ -151,12 +151,12 @@ func TestEngineStartupFailureIsSharedAndTerminal(t *testing.T) {
 		}
 	}
 	for range 3 {
-		if _, _, err := p.runningEngine(ctx); !errors.Is(err, failure) {
+		if _, err := p.runningEngine(ctx); !errors.Is(err, failure) {
 			t.Fatalf("later startup error = %v, want cached failure", err)
 		}
 	}
 	response := p.readWebUI(&url.URL{Path: biliWebUIRoot + "status"})
-	if response.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(response.Body), "start failed: permission denied") {
+	if response.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(response.Body), "Compression storage is unavailable") {
 		t.Fatalf("management startup failure = %d %s", response.StatusCode, response.Body)
 	}
 	_, rpcFailure := p.execute(executorRequest{
@@ -192,14 +192,14 @@ func TestCanceledEngineWaiterDoesNotCancelOtherRequests(t *testing.T) {
 		entered <- contexts{startupCtx, lifetimeCtx}
 		select {
 		case <-release:
-			return engine{client: &http.Client{}, done: make(chan struct{})}, nil
+			return engine{done: make(chan struct{})}, nil
 		case <-startupCtx.Done():
 			return engine{}, startupCtx.Err()
 		}
 	}
 	first := make(chan error, 1)
 	go func() {
-		_, _, err := p.runningEngine(waiterCtx)
+		_, err := p.runningEngine(waiterCtx)
 		first <- err
 	}()
 	var owned contexts
@@ -214,7 +214,7 @@ func TestCanceledEngineWaiterDoesNotCancelOtherRequests(t *testing.T) {
 	}
 	second := make(chan error, 1)
 	go func() {
-		_, _, err := p.runningEngine(ctx)
+		_, err := p.runningEngine(ctx)
 		second <- err
 	}()
 	cancelWaiter()
@@ -249,7 +249,7 @@ func TestCanceledEngineWaiterDoesNotCancelOtherRequests(t *testing.T) {
 	if _, ok := owned.lifetime.Deadline(); ok {
 		t.Fatal("child lifetime inherited the startup deadline")
 	}
-	if _, _, err := p.runningEngine(ctx); err != nil {
+	if _, err := p.runningEngine(ctx); err != nil {
 		t.Fatalf("ready engine unavailable after starter returned: %v", err)
 	}
 	if got := starts.Load(); got != 1 {
@@ -270,14 +270,14 @@ func TestEngineWaitDeadlineDoesNotCancelStartup(t *testing.T) {
 		entered <- startupCtx
 		select {
 		case <-release:
-			return engine{client: &http.Client{}, done: make(chan struct{})}, nil
+			return engine{done: make(chan struct{})}, nil
 		case <-startupCtx.Done():
 			return engine{}, startupCtx.Err()
 		}
 	}
 	ready := make(chan error, 1)
 	go func() {
-		_, _, err := p.runningEngine(ctx)
+		_, err := p.runningEngine(ctx)
 		ready <- err
 	}()
 	var startupCtx context.Context
@@ -288,7 +288,7 @@ func TestEngineWaitDeadlineDoesNotCancelStartup(t *testing.T) {
 	}
 	waiterCtx, cancelWaiter := context.WithTimeout(ctx, 20*time.Millisecond)
 	defer cancelWaiter()
-	_, _, err := p.runningEngine(waiterCtx)
+	_, err := p.runningEngine(waiterCtx)
 	if !errors.Is(err, context.DeadlineExceeded) || engineFailure(err).HTTPStatus != http.StatusGatewayTimeout {
 		t.Fatalf("waiter deadline error = %v", err)
 	}
@@ -329,7 +329,7 @@ func TestShutdownCancelsStartupAndWaitsForCleanup(t *testing.T) {
 	}
 	waiter := make(chan error, 1)
 	go func() {
-		_, _, err := p.runningEngine(ctx)
+		_, err := p.runningEngine(ctx)
 		waiter <- err
 	}()
 	select {
@@ -367,7 +367,7 @@ func TestShutdownCancelsStartupAndWaitsForCleanup(t *testing.T) {
 			t.Fatal("shutdown did not finish after startup cleanup")
 		}
 	}
-	if _, _, err := p.runningEngine(ctx); !errors.Is(err, context.Canceled) {
+	if _, err := p.runningEngine(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("request after shutdown error = %v", err)
 	}
 	if starts.Load() != 1 || stops.Load() != 1 {
@@ -384,14 +384,14 @@ func TestExitedEngineIsTerminalAndShutdownIsIdempotent(t *testing.T) {
 	var starts, stops atomic.Int32
 	p.startEngine = func(context.Context, context.Context) (engine, error) {
 		starts.Add(1)
-		return engine{client: &http.Client{}, done: done, stop: func() { stops.Add(1) }}, nil
+		return engine{done: done, stop: func() { stops.Add(1) }}, nil
 	}
-	if _, _, err := p.runningEngine(ctx); err != nil {
+	if _, err := p.runningEngine(ctx); err != nil {
 		t.Fatalf("initial startup failed: %v", err)
 	}
 	close(done)
 	for range 3 {
-		if _, _, err := p.runningEngine(ctx); !errors.Is(err, errEngineExited) {
+		if _, err := p.runningEngine(ctx); !errors.Is(err, errEngineExited) {
 			t.Fatalf("request after child exit error = %v", err)
 		}
 	}

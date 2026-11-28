@@ -1,15 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
-	"io"
-	"mime"
 	"net/http"
 	"net/url"
 	"regexp"
-	"slices"
 	"strings"
 	"time"
 )
@@ -30,6 +28,7 @@ type managementRequest struct {
 	Method string
 	Path   string
 	Query  url.Values
+	Body   []byte
 }
 
 type managementResponse struct {
@@ -56,10 +55,8 @@ type managementResource struct {
 
 func registerManagement() managementRegistration {
 	return managementRegistration{
-		Routes: []managementRoute{{Method: http.MethodGet, Path: webUIRoute}},
-		Resources: []managementResource{{
-			Path: webUIResource, Menu: "Billion Context", Description: "Read-only WebUI for the bundled billion-context engine",
-		}},
+		Routes:    []managementRoute{{Method: http.MethodGet, Path: webUIRoute}, {Method: http.MethodPut, Path: webUIRoute}},
+		Resources: []managementResource{{Path: webUIResource, Menu: "Billion Context", Description: "Compression activity, sessions and chat notifications"}},
 	}
 }
 
@@ -68,44 +65,48 @@ func (p *plugin) handleManagement(raw []byte) managementResponse {
 	if json.Unmarshal(raw, &req) != nil {
 		return managementError(http.StatusBadRequest, "Invalid management request")
 	}
-	if req.Method != http.MethodGet {
-		return managementError(http.StatusMethodNotAllowed, "The CPA WebUI is read-only")
-	}
 	switch req.Path {
 	case "/v0/resource/plugins/" + pluginID + webUIResource:
+		if req.Method != http.MethodGet {
+			return managementError(http.StatusMethodNotAllowed, "Use GET to open the dashboard")
+		}
 		return newManagementResponse(http.StatusOK, "text/html; charset=utf-8", webUIShell)
 	case "/v0/management" + webUIRoute:
-		if target := req.Query.Get("target"); target == innerRoute && len(req.Query) == 1 {
-			return p.bypassSummary()
-		}
-		target, ok := webUITarget(req.Query)
-		if !ok {
-			return managementError(http.StatusBadRequest, "Unsupported billion-context read target")
-		}
-		return p.readWebUI(target)
 	default:
 		return managementError(http.StatusNotFound, "Unknown management route")
 	}
+	values := req.Query["target"]
+	if len(req.Query) != 1 || len(values) != 1 {
+		return managementError(http.StatusBadRequest, "Choose one dashboard resource")
+	}
+	if req.Method == http.MethodGet && values[0] == innerRoute {
+		return p.bypassSummary()
+	}
+	target, ok := webUITarget(req.Query)
+	if !ok {
+		return managementError(http.StatusBadRequest, "Unknown dashboard resource")
+	}
+	if req.Method == http.MethodGet {
+		return p.readWebUI(target)
+	}
+	if req.Method != http.MethodPut || target.Path != biliWebUIRoot+"settings" {
+		return managementError(http.StatusMethodNotAllowed, "Only chat notifications can be changed here")
+	}
+	if len(req.Body) > 256 || !json.Valid(req.Body) {
+		return managementError(http.StatusBadRequest, "Expected one boolean: visibilityMarkers")
+	}
+	settings := json.NewDecoder(bytes.NewReader(req.Body))
+	opening, _ := settings.Token()
+	key, _ := settings.Token()
+	value, _ := settings.Token()
+	visible, boolean := value.(bool)
+	if opening != json.Delim('{') || key != "visibilityMarkers" || !boolean || settings.More() {
+		return managementError(http.StatusBadRequest, "Expected one boolean: visibilityMarkers")
+	}
+	return p.dashboardOperation("configure", map[string]any{"visibilityMarkers": visible}, nil)
 }
 
-var webUIReads = map[string][]string{
-	"overview":       nil,
-	"sessions":       {"page", "pageSize", "q", "protocol", "client", "state"},
-	"session-report": {"session", "format", "mask", "lang"},
-	"cache-report":   {"session"},
-	"diagnostics":    {"topic"},
-	"stats":          nil,
-	"status":         nil,
-}
-
-var sessionReads = map[string][]string{
-	"detail":        nil,
-	"tree":          nil,
-	"block-content": {"blockId", "view"},
-	"message":       {"ref"},
-}
-
-var webUIName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+var webUIName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$`)
 
 func webUITarget(query url.Values) (*url.URL, bool) {
 	values := query["target"]
@@ -120,80 +121,52 @@ func webUITarget(query url.Values) (*url.URL, bool) {
 	if err != nil || target.Host != "" || target.IsAbs() || target.EscapedPath() != target.Path || target.ForceQuery {
 		return nil, false
 	}
-	name := strings.TrimPrefix(target.Path, biliWebUIRoot)
-	allowed, ok := webUIReads[name]
-	if name == "" {
-		allowed, ok = []string{"embed", "theme"}, true
-	} else if !ok {
+	switch name := strings.TrimPrefix(target.Path, biliWebUIRoot); name {
+	case "overview", "settings":
+		return target, target.RawQuery == ""
+	case "sessions":
+		params, err := url.ParseQuery(target.RawQuery)
+		if err != nil {
+			return nil, false
+		}
+		for key, values := range params {
+			if len(values) != 1 || (key != "page" && key != "pageSize" && key != "q") {
+				return nil, false
+			}
+		}
+		return target, true
+	default:
 		parts := strings.Split(name, "/")
-		if len(parts) == 3 && parts[0] == "sessions" && webUIName.MatchString(parts[1]) {
-			allowed, ok = sessionReads[parts[2]]
-		}
+		return target, len(parts) == 3 && parts[0] == "sessions" && webUIName.MatchString(parts[1]) && parts[2] == "detail" && target.RawQuery == ""
 	}
-	if !ok || (len(allowed) == 0 && target.RawQuery != "") {
-		return nil, false
-	}
-	params, err := url.ParseQuery(target.RawQuery)
-	if err != nil {
-		return nil, false
-	}
-	for key, values := range params {
-		if len(values) != 1 || !slices.Contains(allowed, key) {
-			return nil, false
-		}
-	}
-	if name == "" {
-		theme := params.Get("theme")
-		if params.Has("theme") && theme != "light" && theme != "dark" {
-			return nil, false
-		}
-		params.Set("embed", "1")
-		target.RawQuery = params.Encode()
-	}
-	return target, true
 }
 
 func (p *plugin) readWebUI(target *url.URL) managementResponse {
+	return p.dashboardOperation("dashboard", map[string]any{"target": target.RequestURI()}, target)
+}
+
+func (p *plugin) dashboardOperation(op string, fields map[string]any, target *url.URL) managementResponse {
 	ctx, cancel := context.WithTimeout(p.ctx, webUITimeout)
 	defer cancel()
-	running, _, err := p.runningEngine(ctx)
-	if err != nil {
-		failure := engineFailure(err)
-		return managementError(failure.HTTPStatus, failure.Message)
+	var body json.RawMessage
+	if err := p.kernelCall(ctx, op, fields, &body); err != nil {
+		return managementError(http.StatusServiceUnavailable, "Compression storage is unavailable. Try again.")
 	}
-	destination := running.url
-	destination.Path, destination.RawQuery = target.Path, target.RawQuery
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, destination.String(), nil)
-	if err != nil {
-		return managementError(http.StatusBadGateway, "Could not request bundled billion-context")
+	if len(body) == 0 || string(body) == "null" {
+		return managementError(http.StatusNotFound, "Session not found")
 	}
-	request.Header.Set("X-Omp-Bili-Access", running.token)
-	response, err := running.client.Do(request)
-	if err != nil {
-		return managementError(http.StatusBadGateway, "Could not read bundled billion-context")
+	if len(body) > webUIReadLimit {
+		return managementError(http.StatusRequestEntityTooLarge, "Dashboard result is too large")
 	}
-	defer response.Body.Close()
-
-	contentType := response.Header.Get("Content-Type")
-	mediaType, _, _ := mime.ParseMediaType(contentType)
-	switch {
-	case target.Path == biliWebUIRoot && response.StatusCode == http.StatusOK && mediaType == "text/html":
-	case target.Path != biliWebUIRoot && mediaType == "application/json" &&
-		(response.StatusCode >= 200 && response.StatusCode < 300 || response.StatusCode >= 400 && response.StatusCode < 600):
-	default:
-		return managementError(http.StatusBadGateway, "Unexpected response from bundled billion-context")
+	if target != nil {
+		switch target.Path {
+		case biliWebUIRoot + "overview":
+			body = p.withBypassSummary(body)
+		case biliWebUIRoot + "sessions":
+			body = withReadableTitles(body)
+		}
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, webUIReadLimit+1))
-	if err != nil || len(body) > webUIReadLimit {
-		return managementError(http.StatusBadGateway, "Bundled billion-context response could not be read in full")
-	}
-	if target.Path == biliWebUIRoot+"overview" && response.StatusCode == http.StatusOK {
-		body = p.withBypassSummary(body)
-	}
-	if target.Path == biliWebUIRoot+"sessions" && response.StatusCode == http.StatusOK {
-		body = withReadableTitles(body)
-	}
-	return newManagementResponse(response.StatusCode, contentType, body)
+	return newManagementResponse(http.StatusOK, "application/json", body)
 }
 
 // withReadableTitles rewrites only the display strings of a sessions page.
@@ -325,25 +298,15 @@ func (p *plugin) withBypassSummary(body []byte) []byte {
 		return body
 	}
 	payload["cpaCompression"] = summary
-	// The Overview page renders its session list from overview.recent, so that
-	// array needs the same display cleanup as the Sessions page.
-	if recent, ok := payload["overview"]; ok {
-		var overview map[string]json.RawMessage
-		if json.Unmarshal(recent, &overview) == nil {
-			var rows []map[string]json.RawMessage
-			if json.Unmarshal(overview["recent"], &rows) == nil {
-				changed := false
-				for _, row := range rows {
-					changed = readableRow(row) || changed
-				}
-				if changed {
-					if encoded, err := json.Marshal(rows); err == nil {
-						overview["recent"] = encoded
-						if reencoded, err := json.Marshal(overview); err == nil {
-							payload["overview"] = reencoded
-						}
-					}
-				}
+	if recent, ok := payload["recent"]; ok {
+		var rows []map[string]json.RawMessage
+		if json.Unmarshal(recent, &rows) == nil {
+			changed := false
+			for _, row := range rows {
+				changed = readableRow(row) || changed
+			}
+			if changed {
+				payload["recent"], _ = json.Marshal(rows)
 			}
 		}
 	}

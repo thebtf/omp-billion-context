@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,11 +24,20 @@ func runtimeFixture(t *testing.T, nodeContent string) (runtimeManifest, []byte) 
 	if runtime.GOOS == "windows" {
 		node += ".exe"
 	}
-	files := map[string]string{node: nodeContent, "node_modules/billion-context/dist/index.js": "fixture entry"}
+	files := map[string]string{
+		node:                                    nodeContent,
+		"kernel/worker.mjs":                     "// fixture worker",
+		"kernel/host.mjs":                       "// fixture host",
+		"kernel/store.mjs":                      "// fixture store",
+		"kernel/cache.mjs":                      "// fixture cache",
+		"node_modules/acp-kernel/dist/index.js": "export const fixture = true;",
+		"node_modules/acp-kernel/package.json":  `{"name":"acp-kernel","version":"0.0.0"}`,
+	}
+	names := []string{node, "kernel/worker.mjs", "kernel/host.mjs", "kernel/store.mjs", "kernel/cache.mjs", "node_modules/acp-kernel/dist/index.js", "node_modules/acp-kernel/package.json"}
 	var buffer bytes.Buffer
 	archive := zip.NewWriter(&buffer)
 	required := make(map[string]int64)
-	for _, name := range []string{node, "node_modules/billion-context/dist/index.js"} {
+	for _, name := range names {
 		header := &zip.FileHeader{Name: name, Method: zip.Store}
 		header.SetMode(0o700)
 		file, err := archive.CreateHeader(header)
@@ -47,7 +55,7 @@ func runtimeFixture(t *testing.T, nodeContent string) (runtimeManifest, []byte) 
 	data := buffer.Bytes()
 	digest := sha256.Sum256(data)
 	return runtimeManifest{
-		Schema: 1, BiliVersion: "0.1.216", NodeVersion: "24.22.3", Platform: runtime.GOOS + "-" + runtime.GOARCH,
+		Schema: 2, KernelVersion: "kernel-v1", NodeVersion: "24.22.3", Platform: runtime.GOOS + "-" + runtime.GOARCH,
 		ArchiveSHA256: hex.EncodeToString(digest[:]), Required: required,
 	}, data
 }
@@ -82,33 +90,6 @@ func TestRuntimeDataRootUsesArtifactDirectory(t *testing.T) {
 		if _, err := runtimeDataRoot(library); !errors.Is(err, errRuntimeStorage) {
 			t.Fatalf("unsupported library path %q = %v", library, err)
 		}
-	}
-}
-
-func TestRuntimeFileURL(t *testing.T) {
-	type fileURLCase struct {
-		name string
-		path string
-		want string
-	}
-	cases := []fileURLCase{
-		{"unix", "/opt/bili data/#instance/private-runtime.mjs", "file:///opt/bili%20data/%23instance/private-runtime.mjs"},
-	}
-	if runtime.GOOS == "windows" {
-		cases = []fileURLCase{
-			{"drive", `C:\bili data\#instance\private-runtime.mjs`, "file:///C:/bili%20data/%23instance/private-runtime.mjs"},
-			{"unc", `\\nas\share\bili data\#instance\private-runtime.mjs`, "file://nas/share/bili%20data/%23instance/private-runtime.mjs"},
-			{"extended drive", `\\?\C:\bili data\#instance\private-runtime.mjs`, "file:///C:/bili%20data/%23instance/private-runtime.mjs"},
-			{"extended unc", `\\?\UNC\nas\share\bili data\#instance\private-runtime.mjs`, "file://nas/share/bili%20data/%23instance/private-runtime.mjs"},
-		}
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := runtimeFileURL(tc.path)
-			if got.String() != tc.want {
-				t.Fatalf("preload URL for %q = %q, want %q", tc.path, got.String(), tc.want)
-			}
-		})
 	}
 }
 
@@ -182,7 +163,7 @@ func TestRuntimeUpgradePreservesOldGeneration(t *testing.T) {
 	}
 	upgraded, nextData := runtimeFixture(t, "new executable")
 	versionOnly := upgraded
-	versionOnly.BiliVersion = "0.1.217"
+	versionOnly.KernelVersion = "kernel-v2"
 	for _, next := range []runtimeManifest{upgraded, versionOnly} {
 		installed, err := ensureRuntime(context.Background(), root, next, func() ([]byte, error) { return nextData, nil })
 		if err != nil || installed == old {
@@ -193,14 +174,13 @@ func TestRuntimeUpgradePreservesOldGeneration(t *testing.T) {
 	if err != nil || !os.SameFile(before, after) || !before.ModTime().Equal(after.ModTime()) {
 		t.Fatalf("upgrade changed old completion marker: %v", err)
 	}
-	for name := range first.Required {
-		if filepath.Base(name) == "index.js" {
-			continue
-		}
-		content, err := os.ReadFile(filepath.Join(old, name))
-		if err != nil || string(content) != "old executable" {
-			t.Fatalf("old executable no longer usable: %q, %v", content, err)
-		}
+	node := "node"
+	if runtime.GOOS == "windows" {
+		node += ".exe"
+	}
+	content, err := os.ReadFile(filepath.Join(old, node))
+	if err != nil || string(content) != "old executable" {
+		t.Fatalf("old executable no longer usable: %q, %v", content, err)
 	}
 }
 
@@ -279,7 +259,11 @@ func TestRuntimeCancellationCleansOnlyOwnedStage(t *testing.T) {
 }
 
 func TestRuntimeRefusesCorruptPublishedDirectory(t *testing.T) {
-	for _, corruption := range []string{"missing-marker", "invalid-marker", "wrong-version", "truncated-node", "missing-entry"} {
+	node := "node"
+	if runtime.GOOS == "windows" {
+		node += ".exe"
+	}
+	for _, corruption := range []string{"missing-marker", "invalid-marker", "wrong-version", "legacy-schema", "truncated-node", "missing-entry"} {
 		t.Run(corruption, func(t *testing.T) {
 			root := t.TempDir()
 			manifest, data := runtimeFixture(t, "original executable")
@@ -301,14 +285,24 @@ func TestRuntimeRefusesCorruptPublishedDirectory(t *testing.T) {
 					t.Fatal(marshalErr)
 				}
 				err = os.WriteFile(marker, content, 0o600)
-			case "truncated-node":
-				for name := range manifest.Required {
-					if filepath.Base(name) != "index.js" {
-						err = os.WriteFile(filepath.Join(installed, name), []byte("short"), 0o700)
-					}
+			case "legacy-schema":
+				legacy := struct {
+					Schema        int              `json:"schema"`
+					BiliVersion   string           `json:"bili_version"`
+					NodeVersion   string           `json:"node_version"`
+					Platform      string           `json:"platform"`
+					ArchiveSHA256 string           `json:"archive_sha256"`
+					Required      map[string]int64 `json:"required"`
+				}{1, "0.1.216", manifest.NodeVersion, manifest.Platform, manifest.ArchiveSHA256, manifest.Required}
+				content, marshalErr := json.Marshal(legacy)
+				if marshalErr != nil {
+					t.Fatal(marshalErr)
 				}
+				err = os.WriteFile(marker, content, 0o600)
+			case "truncated-node":
+				err = os.WriteFile(filepath.Join(installed, node), []byte("short"), 0o700)
 			case "missing-entry":
-				err = os.Remove(filepath.Join(installed, "node_modules", "billion-context", "dist", "index.js"))
+				err = os.Remove(filepath.Join(installed, "node_modules", "acp-kernel", "dist", "index.js"))
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -541,102 +535,85 @@ func TestSessionStoreRefusesUnusableDirectory(t *testing.T) {
 	}
 }
 
-func startPreloadFixture(t *testing.T, script string) (stdin io.WriteCloser, exited <-chan error, dir string) {
-	t.Helper()
+func TestKernelWorkerExitsWhenStdinCloses(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
-		t.Skip("node is not installed; the preload shutdown path needs a real node")
+		t.Skip("a real Node process is required")
 	}
-	dir = t.TempDir()
-	watch := filepath.Join(dir, "private-runtime.mjs")
-	if err := os.WriteFile(watch, privateRuntime, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	fixture := filepath.Join(dir, "fixture.cjs")
-	if err := os.WriteFile(fixture, []byte(script), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	t.Cleanup(cancel)
-	preload := runtimeFileURL(watch)
-	cmd := exec.CommandContext(ctx, node, "--import", preload.String(), fixture)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "OMP_ENGINE_TOKEN="+strings.Repeat("ab", 16), "OMP_ENGINE_PROOF=proof", "OMP_TEST_DIR="+dir)
-	configureProcess(cmd)
-	stdin, err = cmd.StdinPipe()
+	root, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cmd.Start(); err != nil {
+	workerFile := filepath.Join(root, "kernel", "worker.mjs")
+	if _, err := os.Stat(workerFile); err != nil {
+		t.Skipf("bundled kernel worker is not present: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	dataRoot := t.TempDir()
+	store, err := claimSessionStore(ctx, dataRoot, time.Second)
+	if err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	ready := filepath.Join(dir, "ready")
-	deadline := time.Now().Add(20 * time.Second)
-	for {
-		if _, err := os.Stat(ready); err == nil {
-			break
-		}
-		select {
-		case err := <-done:
-			t.Fatalf("preload fixture exited before becoming ready: %v", err)
-		default:
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("preload fixture did not become ready")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return stdin, done, dir
-}
-
-func TestPreloadDeliversOrderlyShutdownOnParentClose(t *testing.T) {
-	const script = `const fs = require('node:fs');
-process.on('SIGTERM', () => {
-  fs.writeFileSync(require('node:path').join(process.env.OMP_TEST_DIR, 'flushed'), 'orderly');
-  process.exit(0);
-});
-fs.writeFileSync(require('node:path').join(process.env.OMP_TEST_DIR, 'ready'), 'ready');
-setInterval(() => {}, 1000);
-`
-	stdin, done, dir := startPreloadFixture(t, script)
-	if err := stdin.Close(); err != nil {
+	defer store.release()
+	cmd := exec.Command(node, workerFile, store.dir)
+	cmd.Dir = root
+	configureProcess(cmd)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
 		t.Fatal(err)
 	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := startWithSessionLease(cmd, store.lock); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	waited := false
+	t.Cleanup(func() {
+		if waited {
+			return
+		}
+		_ = cmd.Process.Kill()
+		<-exited
+	})
+	worker := newKernelProcess(stdin, stdout, stderr)
+	var reply struct {
+		Ready bool `json:"ready"`
+	}
+	if err := worker.call(ctx, "ping", nil, &reply); err != nil || !reply.Ready {
+		t.Fatalf("bundled kernel worker ping = %v, %+v", err, reply)
+	}
+	store.release()
+	other, claimErr := claimSessionStore(ctx, dataRoot, 150*time.Millisecond)
+	if other != nil || !errors.Is(claimErr, errSessionStore) {
+		if other != nil {
+			other.release()
+		}
+		t.Fatalf("worker lost the session lease while running: %+v, %v", other, claimErr)
+	}
+	worker.close()
 	select {
-	case err := <-done:
+	case err := <-exited:
+		waited = true
 		if err != nil {
-			t.Fatalf("preload fixture failed: %v", err)
+			t.Fatalf("kernel worker did not finish on stdin EOF: %v", err)
 		}
-	case <-time.After(20 * time.Second):
-		t.Fatal("preload did not finish the orderly shutdown")
+	case <-time.After(15 * time.Second):
+		t.Fatal("kernel worker kept running after its stdin closed")
 	}
-	if content, err := os.ReadFile(filepath.Join(dir, "flushed")); err != nil || string(content) != "orderly" {
-		t.Fatalf("parent close skipped the engine's own shutdown path: %q, %v", content, err)
+	replacement, err := claimSessionStore(ctx, dataRoot, time.Second)
+	if err != nil {
+		t.Fatalf("lease not returned when the worker exited: %v", err)
 	}
-}
-
-func TestPreloadExitsWhenEngineHasNoShutdownHook(t *testing.T) {
-	const script = `const fs = require('node:fs');
-fs.writeFileSync(require('node:path').join(process.env.OMP_TEST_DIR, 'ready'), 'ready');
-setInterval(() => {}, 1000);
-`
-	stdin, done, dir := startPreloadFixture(t, script)
-	if err := stdin.Close(); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("preload fixture failed: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("preload hung instead of exiting for an engine without a shutdown hook")
-	}
-	if _, err := os.Stat(filepath.Join(dir, "flushed")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("unexpected shutdown marker: %v", err)
-	}
+	replacement.release()
 }
 
 func TestSessionStoreStaysLockedWhileOrphanFinishes(t *testing.T) {

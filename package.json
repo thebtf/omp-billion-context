@@ -5,6 +5,6 @@
     "node": "24.22.3"
   },
   "dependencies": {
-    "billion-context": "0.1.216"
+    "acp-kernel": "0.0.101"
   }
 }
