@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -30,12 +31,19 @@ var bundledRuntime embed.FS
 //go:embed private-runtime.mjs
 var privateRuntime []byte
 
-const engineStartupTimeout = 20 * time.Second
+const (
+	engineStartupTimeout = 20 * time.Second
+	// A foreign CPA process may still be draining the shared store.
+	sessionsLockWait   = 3 * time.Second
+	engineFlushTimeout = 12 * time.Second
+	failedFlushTimeout = 3 * time.Second
+)
 
 var (
 	errEngineExited   = errors.New("bundled billion-context engine exited")
 	errRuntimeStorage = errors.New("cannot locate persistent CPA plugins storage from the native library path")
 	errRuntimeCorrupt = errors.New("installed runtime is incomplete or corrupt")
+	errSessionStore   = errors.New("shared session store is unavailable")
 )
 
 type runtimeManifest struct {
@@ -134,6 +142,83 @@ func acquireRuntimeLock(ctx context.Context, path string) (*os.File, error) {
 func releaseRuntimeLock(file *os.File) {
 	unlockRuntime(file)
 	_ = file.Close()
+}
+
+// The child inherits this lease so an orphan flushing after a CPA crash still excludes another writer.
+type sessionStore struct {
+	dir  string
+	lock *os.File
+	once sync.Once
+}
+
+func claimSessionStore(ctx context.Context, dataRoot string, wait time.Duration) (*sessionStore, error) {
+	directory := filepath.Join(dataRoot, "sessions")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return nil, fmt.Errorf("%w: %v", errSessionStore, err)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	path := filepath.Join(dataRoot, "sessions.lock")
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		lock, err := trySessionLease(path)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", errSessionStore, err)
+		}
+		if lock != nil {
+			probe, err := os.CreateTemp(directory, ".write-check-*")
+			if err == nil {
+				_, writeErr := probe.Write([]byte{0})
+				err = errors.Join(writeErr, probe.Close(), os.Remove(probe.Name()))
+			}
+			if err != nil {
+				_ = lock.Close()
+				return nil, fmt.Errorf("%w: %v", errSessionStore, err)
+			}
+			return &sessionStore{dir: directory, lock: lock}, nil
+		}
+		select {
+		case <-waitCtx.Done():
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("%w: %v", errSessionStore, waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+// release hands the directory to the next writer and must run only after the
+// engine process is gone. The durable directory itself is never removed.
+func (s *sessionStore) release() {
+	if s == nil {
+		return
+	}
+	s.once.Do(func() {
+		if lock := s.lock; lock != nil {
+			s.lock = nil
+			_ = lock.Close()
+		}
+	})
+}
+
+// engineStoreEnv pins bili's storage posture. One plain-JSON envelope per
+// session is the only persistent copy: the unified sqlite sidecar would add a
+// second durable file set (index.db plus -wal/-shm/-chk) whose bootstrap can
+// fetch better-sqlite3 from npm. Retention stays bili's own default — the card
+// asks for a session that survives a restart, not for a different eviction
+// policy.
+func engineStoreEnv(directory string) []string {
+	return []string{
+		"BILI_SESSIONS_DIR=" + directory,
+		"BILI_PERSIST=1",
+		"BILI_STORAGE_UNIFIED=legacy",
+		"BILI_SQLITE_AUTO_DOWNLOAD=0",
+	}
 }
 
 func validateRuntimeFiles(ctx context.Context, root string, manifest runtimeManifest) error {
@@ -271,6 +356,8 @@ func (e *engineStartupError) Error() string {
 		reason = errRuntimeStorage.Error()
 	case errors.Is(e.cause, errRuntimeCorrupt):
 		reason = errRuntimeCorrupt.Error()
+	case errors.Is(e.cause, errSessionStore):
+		reason = errSessionStore.Error()
 	case errors.Is(e.cause, context.DeadlineExceeded):
 		reason = "startup timed out"
 	case errors.Is(e.cause, context.Canceled):
@@ -360,12 +447,24 @@ func startEngineAt(startupCtx, lifetimeCtx context.Context, dataRoot string) (en
 	}
 	defer listener.Close()
 	addr := listener.Addr().(*net.TCPAddr)
+	address := addr.String()
+	client := sidecarClient(address)
 	stateRoot := root
-	sessionsDir := filepath.Join(stateRoot, "sessions")
-	// The bili WebUI scans its explicit sessions directory even when persistence is disabled.
-	if err := os.Mkdir(sessionsDir, 0o700); err != nil {
-		return engine{}, &engineStartupError{stage: "start", cause: err}
+	// The shared session store outlives the private generation. Failing to claim
+	// it fails the start: serving an unpersisted engine would silently lose the
+	// history the operator asked to keep.
+	store, err := claimSessionStore(startupCtx, dataRoot, sessionsLockWait)
+	if err != nil {
+		return engine{}, &engineStartupError{stage: "storage", cause: err}
 	}
+	// The lock is handed over only once the engine process is gone: either the
+	// stop path below or a failed start.
+	defer func() {
+		if !kept {
+			store.release()
+		}
+	}()
+	sessionsDir := store.dir
 	configPath := filepath.Join(root, "bili.json")
 	cfg, err := json.Marshal(map[string]any{
 		"host": "127.0.0.1", "port": addr.Port, "upstream": "http://127.0.0.1:1", "logFile": "off",
@@ -400,9 +499,10 @@ func startEngineAt(startupCtx, lifetimeCtx context.Context, dataRoot string) (en
 	}()
 	cmd := exec.CommandContext(childCtx, filepath.Join(runtimeRoot, node), "--import", preload.String(), entry, "start", "--config", configPath, "--no-auto-update", "--no-passthrough")
 	cmd.Dir = root
-	cmd.Env = append(engineEnv(), "BILI_STRICT_PORT="+stringPort(addr), "BILI_SESSIONS_DIR="+sessionsDir,
+	cmd.Env = append(engineEnv(), "BILI_STRICT_PORT="+stringPort(addr),
 		"XDG_CONFIG_HOME="+stateRoot, "XDG_DATA_HOME="+stateRoot, "XDG_STATE_HOME="+stateRoot, "XDG_CACHE_HOME="+stateRoot,
-		"BILI_PERSIST=0", "BILI_RESUME_INHERITANCE=0", "BILI_FORK_ADOPTION=0", "BILI_ADVISORY_CHECK=0", "BILI_RELEASE_NOTES_CHECK=0", "OMP_ENGINE_TOKEN="+token, "OMP_ENGINE_PROOF="+proof)
+		"BILI_RESUME_INHERITANCE=0", "BILI_FORK_ADOPTION=0", "BILI_ADVISORY_CHECK=0", "BILI_RELEASE_NOTES_CHECK=0", "OMP_ENGINE_TOKEN="+token, "OMP_ENGINE_PROOF="+proof)
+	cmd.Env = append(cmd.Env, engineStoreEnv(sessionsDir)...)
 	configureProcess(cmd)
 	parent, err := cmd.StdinPipe()
 	if err != nil {
@@ -419,7 +519,7 @@ func startEngineAt(startupCtx, lifetimeCtx context.Context, dataRoot string) (en
 	if err := startupCtx.Err(); err != nil {
 		return engine{}, &engineStartupError{stage: "start", cause: err}
 	}
-	if err := cmd.Start(); err != nil {
+	if err := startWithSessionLease(cmd, store.lock); err != nil {
 		return engine{}, &engineStartupError{stage: "start", cause: err}
 	}
 	done := make(chan struct{})
@@ -428,21 +528,27 @@ func startEngineAt(startupCtx, lifetimeCtx context.Context, dataRoot string) (en
 		close(done)
 	}()
 	var stopOnce sync.Once
+	// An engine that never became healthy gets a short leash: it has nothing
+	// worth flushing and must not hold a cancelled startup for seconds.
+	flushBudget := failedFlushTimeout
 	stop := func() {
 		stopOnce.Do(func() {
+			// Closing stdin tells the preload to hand bili its own SIGTERM, so
+			// the engine drains and fsyncs its envelopes before exiting. Idle
+			// connections go first: bili's drain waits for open sockets.
+			client.CloseIdleConnections()
 			_ = parent.Close()
 			select {
 			case <-done:
-			case <-time.After(3 * time.Second):
+			case <-time.After(flushBudget):
 				cancelChild()
 				<-done
 			}
 			cancelChild()
+			store.release()
 			_ = os.RemoveAll(root)
 		})
 	}
-	address := addr.String()
-	client := sidecarClient(address)
 	endpoint := url.URL{Scheme: "http", Host: address}
 	if err := waitForEngine(startupCtx, client, endpoint.String()+"/__bili/health", proof, done); err != nil {
 		cancelChild()
@@ -450,6 +556,7 @@ func startEngineAt(startupCtx, lifetimeCtx context.Context, dataRoot string) (en
 		client.CloseIdleConnections()
 		return engine{}, &engineStartupError{stage: "health", cause: err}
 	}
+	flushBudget = engineFlushTimeout
 	kept = true
 	return engine{url: endpoint, client: client, stop: stop, done: done, token: token}, nil
 }

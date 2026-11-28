@@ -3,6 +3,10 @@ import { timingSafeEqual } from 'node:crypto';
 
 const token = Buffer.from(process.env.OMP_ENGINE_TOKEN);
 const proof = process.env.OMP_ENGINE_PROOF;
+// The plugin's own leash on a stopped engine is shorter than this timer, so it
+// only decides the case where the plugin is gone and the shutdown below never
+// finishes.
+const exitDeadlineMs = 20000;
 delete process.env.OMP_ENGINE_TOKEN;
 delete process.env.OMP_ENGINE_PROOF;
 
@@ -31,7 +35,19 @@ Server.prototype.emit = function (event, ...args) {
   return Reflect.apply(emit, this, [event, ...args]);
 };
 
-function parentClosed() { process.exit(0); }
+// bili performs its own durable write per session envelope and flushes the
+// pending ones during an orderly shutdown: it stops accepting connections,
+// drains, then flushes every session, and it registers SIGTERM/SIGINT handlers
+// for exactly that. Closing stdin therefore requests that shutdown instead of
+// exiting at once and dropping the last fold. A build without a handler gets the
+// immediate exit.
+let leaving = false;
+function parentClosed() {
+  if (leaving) return;
+  leaving = true;
+  setTimeout(() => process.exit(0), exitDeadlineMs);
+  if (!process.emit('SIGTERM')) process.exit(0);
+}
 process.stdin.once('end', parentClosed);
 process.stdin.once('error', parentClosed);
 process.stdin.resume();

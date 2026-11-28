@@ -30,6 +30,9 @@ import "C"
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"unsafe"
 )
@@ -57,4 +60,41 @@ func tryRuntimeLock(file *os.File) (bool, error) {
 
 func unlockRuntime(file *os.File) {
 	C.bili_unlock(C.uintptr_t(file.Fd()))
+}
+
+// Share denial survives a parent-only crash until the child closes its copy. LockFileEx is process-owned.
+func trySessionLease(path string) (*os.File, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.HasPrefix(abs, `\\?\`) {
+		if unc, ok := strings.CutPrefix(abs, `\\`); ok {
+			abs = `\\?\UNC\` + unc
+		} else {
+			abs = `\\?\` + abs
+		}
+	}
+	name, err := syscall.UTF16PtrFromString(abs)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := syscall.CreateFile(name, syscall.GENERIC_READ|syscall.GENERIC_WRITE, 0, nil, syscall.OPEN_ALWAYS, syscall.FILE_ATTRIBUTE_NORMAL, 0)
+	if err == syscall.Errno(C.ERROR_SHARING_VIOLATION) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(handle), path), nil
+}
+
+func startWithSessionLease(cmd *exec.Cmd, file *os.File) error {
+	handle := syscall.Handle(file.Fd())
+	if err := syscall.SetHandleInformation(handle, syscall.HANDLE_FLAG_INHERIT, syscall.HANDLE_FLAG_INHERIT); err != nil {
+		return err
+	}
+	defer syscall.SetHandleInformation(handle, syscall.HANDLE_FLAG_INHERIT, 0)
+	cmd.SysProcAttr.AdditionalInheritedHandles = append(cmd.SysProcAttr.AdditionalInheritedHandles, handle)
+	return cmd.Start()
 }

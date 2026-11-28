@@ -515,6 +515,15 @@ try {
 	const otherText = await other.text();
 	assert.equal(other.status, 200, otherText);
 	assert(!JSON.stringify(requests.at(-1).body.messages).includes(foldSummary), 'A second CPA client must not inherit the first client’s summary');
+	const savedSessions = async () => {
+		const response = await readWebUI('/__bili/sessions?page=1&pageSize=100');
+		assert.equal(response.status, 200);
+		return (await response.json()).sessions;
+	};
+	const foldedRows = (await savedSessions()).filter(row => row.blocks > 0);
+	assert.equal(foldedRows.length, 1, 'Only the original caller folded this fixture');
+	const foldedSessionId = foldedRows[0].id;
+	assert(foldedSessionId);
 	console.log('Bundled bili folded history; CPA preserved the account, cache key and prefix; caller state stayed isolated');
 
 	async function eventually(check, message, milliseconds = 10000) {
@@ -542,22 +551,27 @@ try {
 		assert(!(await engineDirs()).includes(instance), 'Quiesce must remove the retired private instance');
 		await assert.rejects(fetch(`http://127.0.0.1:${config.port}/__bili/health`, { signal: AbortSignal.timeout(1000) }), 'Retired engine must no longer listen');
 	}
-	async function coldRecovery(previous) {
-		assert.deepEqual(await engineDirs(), [], 'Completed quiesce must leave recovery lazy');
-		const overview = await readWebUI('/__bili/overview');
-		assert.equal(overview.status, 200, await overview.clone().text());
-		assert.equal((await overview.json()).overview.requests, 0, 'Resumed engine starts with cold process-local state');
-		const instances = await engineDirs();
-		assert.equal(instances.length, 1);
-		assert.notEqual(instances[0], previous, 'Recovery needs a new private generation');
+	async function assertStoredFold() {
+		const row = (await savedSessions()).find(item => item.id === foldedSessionId);
+		assert(row, 'The historic session must be in the WebUI before the client sends any replay');
 		const response = await call('chat/completions', { model, stream: true, messages: followup, prompt_cache_key: 'existing-cache-key' }, cycleHeaders);
 		const text = await response.text();
 		assert.equal(response.status, 200, text);
 		assert.match(text, /smoke-ok/);
 		const received = requests.at(-1).body;
-		assert(!JSON.stringify(received.messages).includes(foldSummary), 'A stopped engine does not promise persisted summaries');
-		assert(JSON.stringify(received.messages).includes(`${foldMarker}1 `.repeat(10)), 'Cold recovery must receive the complete client history');
+		assert(JSON.stringify(received.messages).includes(foldSummary), 'The restored engine must send the previous summary');
+		assert(!JSON.stringify(received.messages).includes(`${foldMarker}1 `.repeat(10)), 'The restored engine must omit the folded originals');
 		assert.deepEqual(cacheFields(received), cacheFields(replay.body));
+		const otherClient = await call('chat/completions', { model, stream: true, messages: followup, prompt_cache_key: 'existing-cache-key' }, { ...cycleHeaders, authorization: ['Bearer', 'synthetic-other-client'].join(' ') });
+		assert.equal(otherClient.status, 200, await otherClient.text());
+		assert(!JSON.stringify(requests.at(-1).body.messages).includes(foldSummary), 'Restoration must keep CPA callers isolated');
+	}
+	async function coldRecovery(previous) {
+		assert.deepEqual(await engineDirs(), [], 'Completed quiesce must leave recovery lazy');
+		await assertStoredFold();
+		const instances = await engineDirs();
+		assert.equal(instances.length, 1);
+		assert.notEqual(instances[0], previous, 'Recovery needs a new private generation');
 		assert.deepEqual(await runtimeSnapshot(runtimeParent), originalRuntime, 'Recovery reuses the immutable shared runtime');
 		return { instance: instances[0], config: JSON.parse(await readFile(join(dataRoot, 'instances', instances[0], 'bili.json'), 'utf8')) };
 	}
@@ -680,9 +694,7 @@ try {
 	const restartedListing = await ready(`${cpaUrl}/v0/management/plugins`, restarted, managementHeaders);
 	assert.equal(restartedListing.plugins.find(plugin => plugin.id === 'omp-billion-context')?.registered, true);
 	assert.deepEqual(await engineDirs(), [], 'Restart must not start an engine before its first supported request');
-	const restartedOverview = await readWebUI('/__bili/overview');
-	assert.equal(restartedOverview.status, 200, await restartedOverview.clone().text());
-	assert.equal((await restartedOverview.json()).overview.requests, 0, 'Conversation state must not persist across CPA restarts');
+	await assertStoredFold();
 	await assert.rejects(stat(join(platformDir, 'omp-billion-context')), { code: 'ENOENT' });
 	const newInstances = await engineDirs();
 	assert.equal(newInstances.length, 1);
@@ -734,7 +746,7 @@ try {
 	assert.deepEqual(await runtimeSnapshot(runtimeParent), originalRuntime, 'Warm requests must leave installed runtime files unchanged');
 	await stopCPA(restarted, dataRoot);
 	assert.deepEqual(await engineDirs(), [], 'Both CPA starts must clean their private instances');
-	assert.deepEqual(await runtimeSnapshot(runtimeParent), originalRuntime, 'Only installed runtimes and their stable lock files persist after shutdown');
+	assert.deepEqual(await runtimeSnapshot(runtimeParent), originalRuntime, 'The installed runtime and its lock remain unchanged after shutdown');
 	console.log('Root and platform plugin locations reused one plugins-root runtime and removed their separate private instances');
 } catch (error) {
 	for (const { log } of children) if (log) console.error(log);

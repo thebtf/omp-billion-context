@@ -8,10 +8,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -430,4 +432,257 @@ func TestRuntimeLockExcludesAnotherProcessAndKeepsFile(t *testing.T) {
 	if err != nil || !os.SameFile(before, after) {
 		t.Fatalf("release replaced or removed stable lock: %v", err)
 	}
+}
+
+func TestSessionStorePersistsAcrossGenerations(t *testing.T) {
+	dataRoot := t.TempDir()
+	first, err := claimSessionStore(context.Background(), dataRoot, time.Second)
+	if err != nil {
+		t.Fatalf("free store was not claimed: %v", err)
+	}
+	want := filepath.Join(dataRoot, "sessions")
+	if first.dir != want {
+		t.Fatalf("store directory = %q, want %q", first.dir, want)
+	}
+	if info, err := os.Stat(want); err != nil || !info.IsDir() {
+		t.Fatalf("durable directory missing: %v", err)
+	}
+	envelope := filepath.Join(want, "openai", "127.0.0.1_abc.json")
+	if err := os.MkdirAll(filepath.Dir(envelope), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(envelope, []byte(`{"id":"abc"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first.release()
+	first.release()
+
+	second, err := claimSessionStore(context.Background(), dataRoot, time.Second)
+	if err != nil {
+		t.Fatalf("released store was not claimable again: %v", err)
+	}
+	defer second.release()
+	if content, err := os.ReadFile(envelope); err != nil || string(content) != `{"id":"abc"}` {
+		t.Fatalf("durable envelope did not survive the generation change: %q, %v", content, err)
+	}
+}
+
+func TestSessionStoreRefusesSecondWriter(t *testing.T) {
+	dataRoot := t.TempDir()
+	first, err := claimSessionStore(context.Background(), dataRoot, time.Second)
+	if err != nil {
+		t.Fatalf("first writer did not claim the store: %v", err)
+	}
+	defer first.release()
+	started := time.Now()
+	second, err := claimSessionStore(context.Background(), dataRoot, 150*time.Millisecond)
+	if second != nil {
+		second.release()
+		t.Fatal("second writer shared the store with the first")
+	}
+	// The refusal must identify itself as storage and keep the cause readable,
+	// while staying a storage failure: an engineFailure must not report a held
+	// store as a startup timeout.
+	if !errors.Is(err, errSessionStore) {
+		t.Fatalf("contended claim error = %v, want a session-store refusal", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("contended claim would be reported as a timeout: %v", err)
+	}
+	if !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("contended claim hid the underlying lock error: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < 150*time.Millisecond {
+		t.Fatalf("contended claim returned before its bounded wait: %v", elapsed)
+	}
+}
+
+func TestSessionStoreRefusesReadOnlyDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires Unix permission bits and an unprivileged user")
+	}
+	root := t.TempDir()
+	dir := filepath.Join(root, "sessions")
+	if err := os.Mkdir(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o700)
+	store, err := claimSessionStore(context.Background(), root, time.Second)
+	if store != nil {
+		store.release()
+		t.Fatal("accepted an unwritable session directory")
+	}
+	if !errors.Is(err, errSessionStore) {
+		t.Fatalf("want session store refusal, got %v", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err = claimSessionStore(context.Background(), root, time.Second)
+	if err != nil {
+		t.Fatalf("writer lease retained after failed write probe: %v", err)
+	}
+	store.release()
+}
+
+func TestSessionStoreRefusesUnusableDirectory(t *testing.T) {
+	dataRoot := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(dataRoot, []byte("occupied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, claimErr := claimSessionStore(context.Background(), dataRoot, time.Second)
+	if store != nil || claimErr == nil {
+		store.release()
+		t.Fatalf("unusable root was accepted: %+v", store)
+	}
+	startup := (&engineStartupError{stage: "storage", cause: claimErr}).Error()
+	if !strings.Contains(startup, "session store") || strings.Contains(startup, dataRoot) {
+		t.Fatalf("startup error does not name the session store: %q", startup)
+	}
+}
+
+func startPreloadFixture(t *testing.T, script string) (stdin io.WriteCloser, exited <-chan error, dir string) {
+	t.Helper()
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not installed; the preload shutdown path needs a real node")
+	}
+	dir = t.TempDir()
+	watch := filepath.Join(dir, "private-runtime.mjs")
+	if err := os.WriteFile(watch, privateRuntime, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture := filepath.Join(dir, "fixture.cjs")
+	if err := os.WriteFile(fixture, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	preload := runtimeFileURL(watch)
+	cmd := exec.CommandContext(ctx, node, "--import", preload.String(), fixture)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "OMP_ENGINE_TOKEN="+strings.Repeat("ab", 16), "OMP_ENGINE_PROOF=proof", "OMP_TEST_DIR="+dir)
+	configureProcess(cmd)
+	stdin, err = cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	ready := filepath.Join(dir, "ready")
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("preload fixture exited before becoming ready: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("preload fixture did not become ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return stdin, done, dir
+}
+
+func TestPreloadDeliversOrderlyShutdownOnParentClose(t *testing.T) {
+	const script = `const fs = require('node:fs');
+process.on('SIGTERM', () => {
+  fs.writeFileSync(require('node:path').join(process.env.OMP_TEST_DIR, 'flushed'), 'orderly');
+  process.exit(0);
+});
+fs.writeFileSync(require('node:path').join(process.env.OMP_TEST_DIR, 'ready'), 'ready');
+setInterval(() => {}, 1000);
+`
+	stdin, done, dir := startPreloadFixture(t, script)
+	if err := stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("preload fixture failed: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("preload did not finish the orderly shutdown")
+	}
+	if content, err := os.ReadFile(filepath.Join(dir, "flushed")); err != nil || string(content) != "orderly" {
+		t.Fatalf("parent close skipped the engine's own shutdown path: %q, %v", content, err)
+	}
+}
+
+func TestPreloadExitsWhenEngineHasNoShutdownHook(t *testing.T) {
+	const script = `const fs = require('node:fs');
+fs.writeFileSync(require('node:path').join(process.env.OMP_TEST_DIR, 'ready'), 'ready');
+setInterval(() => {}, 1000);
+`
+	stdin, done, dir := startPreloadFixture(t, script)
+	if err := stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("preload fixture failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("preload hung instead of exiting for an engine without a shutdown hook")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "flushed")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected shutdown marker: %v", err)
+	}
+}
+
+func TestSessionStoreStaysLockedWhileOrphanFinishes(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("a real Node process is required")
+	}
+	root := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	parent, err := claimSessionStore(ctx, root, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.release()
+	child := exec.CommandContext(ctx, node, "-e", "process.stdin.resume()")
+	configureProcess(child)
+	stdin, err := child.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	if err = startWithSessionLease(child, parent.lock); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- child.Wait(); close(done) }()
+	defer func() { _ = stdin.Close(); <-done }()
+	parent.release()
+	second, err := claimSessionStore(ctx, root, 150*time.Millisecond)
+	if second != nil {
+		second.release()
+		t.Fatal("another writer entered before the child exited")
+	}
+	if !errors.Is(err, errSessionStore) {
+		t.Fatalf("want busy store, got %v", err)
+	}
+	if err = stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := claimSessionStore(ctx, root, time.Second)
+	if err != nil {
+		t.Fatalf("lease not returned on child exit: %v", err)
+	}
+	replacement.release()
 }

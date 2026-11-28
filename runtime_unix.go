@@ -28,6 +28,7 @@ import "C"
 
 import (
 	"os"
+	"os/exec"
 	"syscall"
 )
 
@@ -53,4 +54,22 @@ func tryRuntimeLock(file *os.File) (bool, error) {
 
 func unlockRuntime(file *os.File) {
 	C.bili_unlock(C.int(file.Fd()))
+}
+
+func trySessionLease(path string) (*os.File, error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if held, err := tryRuntimeLock(file); err != nil || !held {
+		_ = file.Close()
+		return nil, err
+	}
+	return file, nil
+}
+
+// flock belongs to the open file description shared with the child. Never issue LOCK_UN on this lease.
+func startWithSessionLease(cmd *exec.Cmd, file *os.File) error {
+	cmd.ExtraFiles = append(cmd.ExtraFiles, file)
+	return cmd.Start()
 }

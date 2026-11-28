@@ -226,14 +226,26 @@ func withReadableTitles(body []byte) []byte {
 	return merged
 }
 
+// rowDisplayOrder is the order in which the bundled list picks the string it
+// prints for a row: the title, then the label, then the first-turn hint.
+var rowDisplayOrder = []string{"title", "label", "firstBlockHint"}
+
+// rowNameSources are the fields that can name a session, most deliberate
+// first: an operator's rename, then an explicit label, then the opener of the
+// first turn. A title that only repeats harness scaffolding yields to these.
+var rowNameSources = []string{"hostTitle", "label", "firstBlockHint"}
+
+// rowTitleFields are every field of a session row that carries display text.
+var rowTitleFields = []string{"title", "hostTitle", "label", "firstBlockHint"}
+
 // readableRow rewrites the display strings of one session row in place and
-// reports whether anything changed.
+// reports whether anything changed. Identifiers, counters and unknown fields
+// are never touched, and a field is only written when its text really changes.
 func readableRow(row map[string]json.RawMessage) bool {
-	fields := []string{"title", "hostTitle", "firstBlockHint"}
-	cleaned := make(map[string]string, len(fields))
-	empty := make(map[string]bool, len(fields))
+	cleaned := make(map[string]string, len(rowTitleFields))
+	blanked := make([]string, 0, 2)
 	changed := false
-	for _, field := range fields {
+	for _, field := range rowTitleFields {
 		raw, ok := row[field]
 		if !ok {
 			continue
@@ -243,30 +255,23 @@ func readableRow(row map[string]json.RawMessage) bool {
 			continue
 		}
 		readable := sessionTitle(value)
-		if readable == "" {
-			// A field that was nothing but wrapper tags must not keep them;
-			// clearing it lets an informative sibling name the row.
-			empty[field] = true
-			if encoded, err := json.Marshal(""); err == nil {
-				row[field] = encoded
-				changed = true
-			}
-			continue
-		}
 		cleaned[field] = readable
-		if readable == value {
-			continue
-		}
-		if encoded, err := json.Marshal(readable); err == nil {
-			row[field] = encoded
+		if readable != value && writeDisplayString(row, field, readable) {
 			changed = true
 		}
+		if readable == "" {
+			// A field that was nothing but wrapper tags is empty now, so the
+			// row must not keep markup where a sibling names the work.
+			blanked = append(blanked, field)
+		}
 	}
-	// The list shows title, then hostTitle, then the hint. A boilerplate first
-	// choice hides a later field that actually names the work.
-	var best string
-	for _, field := range fields {
-		if value := cleaned[field]; value != "" && !isBoilerplate(value) && !isGenericJob(value) {
+	// A field that was only tags is empty now, so a sibling that names the work
+	// fills it. Then the field the list prints first must say something: when it
+	// is the harness preamble, the name goes into `title` if that slot is free,
+	// so the preamble keeps its date instead of being overwritten.
+	best := ""
+	for _, field := range rowNameSources {
+		if value := cleaned[field]; usefulTitle(value) {
 			best = value
 			break
 		}
@@ -274,27 +279,37 @@ func readableRow(row map[string]json.RawMessage) bool {
 	if best == "" {
 		return changed
 	}
-	for _, field := range fields {
-		if empty[field] {
-			if encoded, err := json.Marshal(best); err == nil {
-				row[field] = encoded
-				changed = true
-			}
-			continue
-		}
+	for _, field := range blanked {
+		changed = writeDisplayString(row, field, best) || changed
+	}
+	for _, field := range rowDisplayOrder {
 		value, ok := cleaned[field]
-		if !ok {
+		if !ok || value == "" {
 			continue
 		}
-		if isBoilerplate(value) || isGenericJob(value) {
-			if encoded, err := json.Marshal(best); err == nil {
-				row[field] = encoded
-				changed = true
-			}
+		if !usefulTitle(value) {
+			// The printed field is the preamble: `title` is what the list reads
+			// first, so the name goes there while the hint keeps its date.
+			changed = writeDisplayString(row, "title", best) || changed
 		}
+		// Only the first non-empty value decides what the list prints.
 		break
 	}
 	return changed
+}
+
+// writeDisplayString stores one display string in a row field and reports
+// whether the encoded value differs from what was there.
+func writeDisplayString(row map[string]json.RawMessage, field, value string) bool {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return false
+	}
+	if string(row[field]) == string(encoded) {
+		return false
+	}
+	row[field] = encoded
+	return true
 }
 
 // withBypassSummary attaches the plugin's own counters to bili's overview JSON.

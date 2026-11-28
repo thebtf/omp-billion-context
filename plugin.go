@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -144,6 +145,16 @@ func (p *plugin) runningEngine(ctx context.Context) (engine, *modelRelay, error)
 		return engine{}, nil, err
 	}
 	if attempt.err != nil {
+		// A held session store is expected to free up: the other CPA process owns
+		// it only for as long as it runs. Report the refusal to this request but do
+		// not cache it for the plugin's lifetime.
+		if errors.Is(attempt.err, errSessionStore) {
+			p.engineMu.Lock()
+			if p.attempt == attempt {
+				p.attempt = nil
+			}
+			p.engineMu.Unlock()
+		}
 		return engine{}, nil, attempt.err
 	}
 	select {

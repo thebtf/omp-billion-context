@@ -15,6 +15,9 @@ func TestSessionTitleDropsConversationTags(t *testing.T) {
 		{"chat wrapper with inner markup", "<chat> <user> привет </user> </chat>", "привет"},
 		{"unterminated wrapper", "<chat> <user> show me the diff", "show me the diff"},
 		{"plain text", "plain conversation title", "plain conversation title"},
+		{"directory in a real title", "Current working directory detection is broken", "Current working directory detection is broken"},
+		{"title with internal separators", "Today: 2026-11-28 — BILI-010 — fix the list; keep full IDs", "BILI-010 — fix the list; keep full IDs"},
+		{"directory path before title", `Current working dir D:\work — Fix title parsing`, "Fix title parsing"},
 		{"only tags", "<job></job>", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -22,6 +25,38 @@ func TestSessionTitleDropsConversationTags(t *testing.T) {
 				t.Fatalf("sessionTitle(%q) = %q, want %q", tc.raw, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestSessionTitleKeepsAWholeTitleThatContainsADash(t *testing.T) {
+	const raw = "BILI-010 — fix the session list"
+	if got := sessionTitle(raw); got != raw {
+		t.Fatalf("sessionTitle(%q) = %q, want it whole", raw, got)
+	}
+}
+
+func TestSessionTitleCutsOnlyTheScaffoldingBeforeTheTurn(t *testing.T) {
+	const raw = "Today: 2026-11-28 — make the list readable"
+	if got := sessionTitle(raw); got != "make the list readable" {
+		t.Fatalf("sessionTitle(%q) = %q, want the turn after the preamble", raw, got)
+	}
+}
+
+// The list decides how much fits and the tooltip keeps the whole string, so the
+// bridge must not shorten a title on its way through.
+func TestSessionTitleNeverShortensALongTitle(t *testing.T) {
+	raw := strings.TrimSpace(strings.Repeat("readable naming ", 20))
+	if got := sessionTitle(raw); got != raw {
+		t.Fatalf("a %d-rune title came back as %d runes", len(raw), len(got))
+	}
+}
+
+// Every session of a project opens with the same working directory and the same
+// instruction reminder; only the date tells them apart.
+func TestSessionTitleDropsTheRepeatedPreambleTail(t *testing.T) {
+	raw := "<system-reminder> Today: 2026-11-28; current working dir D:\\work; do not repeat this information"
+	if got := sessionTitle(raw); got != "Today: 2026-11-28" {
+		t.Fatalf("sessionTitle(%q) = %q", raw, got)
 	}
 }
 
