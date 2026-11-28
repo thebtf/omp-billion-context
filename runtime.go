@@ -170,6 +170,15 @@ func claimSessionStore(ctx context.Context, dataRoot string, wait time.Duration)
 			return nil, fmt.Errorf("%w: %v", errSessionStore, err)
 		}
 		if lock != nil {
+			probe, err := os.CreateTemp(directory, ".write-check-*")
+			if err == nil {
+				_, writeErr := probe.Write([]byte{0})
+				err = errors.Join(writeErr, probe.Close(), os.Remove(probe.Name()))
+			}
+			if err != nil {
+				_ = lock.Close()
+				return nil, fmt.Errorf("%w: %v", errSessionStore, err)
+			}
 			return &sessionStore{dir: directory, lock: lock}, nil
 		}
 		select {

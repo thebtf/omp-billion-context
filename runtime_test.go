@@ -497,6 +497,34 @@ func TestSessionStoreRefusesSecondWriter(t *testing.T) {
 	}
 }
 
+func TestSessionStoreRefusesReadOnlyDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires Unix permission bits and an unprivileged user")
+	}
+	root := t.TempDir()
+	dir := filepath.Join(root, "sessions")
+	if err := os.Mkdir(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o700)
+	store, err := claimSessionStore(context.Background(), root, time.Second)
+	if store != nil {
+		store.release()
+		t.Fatal("accepted an unwritable session directory")
+	}
+	if !errors.Is(err, errSessionStore) {
+		t.Fatalf("want session store refusal, got %v", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err = claimSessionStore(context.Background(), root, time.Second)
+	if err != nil {
+		t.Fatalf("writer lease retained after failed write probe: %v", err)
+	}
+	store.release()
+}
+
 func TestSessionStoreRefusesUnusableDirectory(t *testing.T) {
 	dataRoot := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(dataRoot, []byte("occupied"), 0o600); err != nil {

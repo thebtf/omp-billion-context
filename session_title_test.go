@@ -15,6 +15,9 @@ func TestSessionTitleDropsConversationTags(t *testing.T) {
 		{"chat wrapper with inner markup", "<chat> <user> привет </user> </chat>", "привет"},
 		{"unterminated wrapper", "<chat> <user> show me the diff", "show me the diff"},
 		{"plain text", "plain conversation title", "plain conversation title"},
+		{"directory in a real title", "Current working directory detection is broken", "Current working directory detection is broken"},
+		{"title with internal separators", "Today: 2026-11-28 — BILI-010 — fix the list; keep full IDs", "BILI-010 — fix the list; keep full IDs"},
+		{"directory path before title", `Current working dir D:\work — Fix title parsing`, "Fix title parsing"},
 		{"only tags", "<job></job>", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -14,17 +14,9 @@ var titleTags = []string{"chat", "user", "job", "assistant", "system-reminder", 
 // first turn of every conversation. They repeat on every row, so a sibling
 // field is preferred whenever one exists.
 var boilerplatePrefixes = []string{
-	"today:", "current working dir", "do not repeat this information",
+	"today:", "do not repeat this information",
 	"system-reminder", "you are a", "you have ",
 }
-
-// titleSeparators split one hint into the clauses a harness joins with its own
-// scaffolding: a semicolon, a dash. They are the boundaries a preamble leaves
-// before the turn the operator typed, so a title cut inside the preamble can
-// still name the work. They are only consulted for a text that is scaffolding
-// from its first word: a real title that happens to contain a dash keeps both
-// of its halves.
-var titleSeparators = []string{"; ", " — "}
 
 // sessionTitle turns raw conversation text into something that identifies the
 // session. Wrapper tags are removed and whitespace collapsed by turnTexts, so
@@ -37,15 +29,9 @@ func sessionTitle(raws ...string) string {
 	for _, raw := range raws {
 		texts := turnTexts(raw)
 		for _, text := range texts {
-			if usefulTitle(text) {
-				return text
-			}
-			// The whole text is the injected preamble. A client that joined it
-			// to the operator's own turn still leaves that turn readable after
-			// a separator.
-			for _, clause := range titleClauses(text)[1:] {
-				if usefulTitle(clause) {
-					return clause
+			for rest := text; rest != ""; rest = afterTitleClause(rest) {
+				if usefulTitle(rest) {
+					return rest
 				}
 			}
 		}
@@ -94,26 +80,15 @@ func usefulTitle(text string) bool {
 	return text != "" && !isBoilerplate(text) && !isGenericJob(text)
 }
 
-// titleClauses splits cleaned conversation text at the punctuation a harness
-// puts between its own preamble and the turn the operator typed. Cleaning has
-// already collapsed the newlines, so the separators that survive it are the
-// semicolon and the dash; the clauses are kept in order.
-func titleClauses(text string) []string {
-	parts := []string{text}
-	for _, separator := range titleSeparators {
-		var next []string
-		for _, part := range parts {
-			next = append(next, strings.Split(part, separator)...)
-		}
-		parts = next
-	}
-	clauses := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if part = strings.TrimSpace(part); part != "" {
-			clauses = append(clauses, part)
+// Remove only the leading clause: punctuation within the actual title is content.
+func afterTitleClause(text string) string {
+	start := len(text)
+	for _, sep := range []string{"; ", " — "} {
+		if i := strings.Index(text, sep); i >= 0 && i+len(sep) < start {
+			start = i + len(sep)
 		}
 	}
-	return clauses
+	return strings.TrimSpace(text[start:])
 }
 
 // turnTexts returns every readable segment of one raw field, in order.
@@ -140,6 +115,23 @@ func isGenericJob(text string) bool {
 
 func isBoilerplate(text string) bool {
 	lower := strings.ToLower(strings.TrimSpace(text))
+	for _, marker := range []string{"current working directory", "current working dir"} {
+		if rest, ok := strings.CutPrefix(lower, marker); ok {
+			if strings.HasPrefix(rest, ":") {
+				return true
+			}
+			if strings.HasPrefix(rest, " ") {
+				path := strings.TrimSpace(rest)
+				if strings.HasPrefix(path, "/") || strings.HasPrefix(path, "\\") || len(path) >= 3 && path[1] == ':' && (path[2] == '/' || path[2] == '\\') {
+					return true
+				}
+			}
+		}
+	}
+	// bili clips automatic titles in the middle of the directory marker.
+	if part, ok := strings.CutSuffix(lower, "…"); ok && strings.HasPrefix(part, "current working dir") && strings.HasPrefix("current working directory:", part) {
+		return true
+	}
 	for _, prefix := range boilerplatePrefixes {
 		if strings.HasPrefix(lower, prefix) {
 			return true
