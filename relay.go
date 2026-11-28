@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -45,10 +46,11 @@ type replayGuard struct {
 }
 
 type modelTurn struct {
-	guard   *replayGuard
-	ctx     context.Context
-	call    hostCall
-	request hostModelRequest
+	summaryCache *emptySummaryCache
+	guard        *replayGuard
+	ctx          context.Context
+	call         hostCall
+	request      hostModelRequest
 }
 
 type hostModelRequest struct {
@@ -130,6 +132,10 @@ func (r *modelRelay) begin(ctx context.Context, req executorRequest, guard *repl
 	endpoint := prefix + path
 	requestPath, _ := req.Metadata["request_path"].(string)
 	callerScope, _ := req.Metadata["caller_scope"].(string)
+	var summaryCache *emptySummaryCache
+	if req.SourceFormat == claude && streamPreflightSummary(req.Payload) == nil {
+		summaryCache = &emptySummaryCache{}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -140,9 +146,10 @@ func (r *modelRelay) begin(ctx context.Context, req executorRequest, guard *repl
 	}
 	turnCtx, cancel := context.WithCancel(ctx)
 	r.turns[endpoint] = modelTurn{
-		guard: guard,
-		ctx:   turnCtx,
-		call:  call,
+		summaryCache: summaryCache,
+		guard:        guard,
+		ctx:          turnCtx,
+		call:         call,
 		request: hostModelRequest{
 			EntryProtocol:  req.SourceFormat,
 			ExitProtocol:   req.Format,
@@ -233,11 +240,39 @@ func (r *modelRelay) serveHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if request.Stream {
-		relayModelStream(ctx, w, request, turn.call)
+		relayModelStream(ctx, w, request, turn.call, nil)
+		return
+	}
+	var streaming []byte
+	if turn.summaryCache != nil {
+		streaming = streamPreflightSummary(request.Body)
+	}
+	if streaming != nil {
+		summary := &claudeSummary{cache: turn.summaryCache, key: sha256.Sum256(request.Body)}
+		if last := summary.cache.last.Load(); last != nil && *last == summary.key {
+			summary.reply(w)
+			return
+		}
+		if !summary.cache.preferStream.Load() {
+			var response hostModelResponse
+			failure := turn.call(hostModelExecute, request, &response)
+			if !emptyClaudeCompletion(response, failure) {
+				writeModelJSON(w, response, failure)
+				return
+			}
+			summary.cache.preferStream.Store(true)
+		}
+		request.Body, request.Stream = streaming, true
+		relayModelStream(ctx, w, request, turn.call, summary)
 		return
 	}
 	var response hostModelResponse
-	if failure := turn.call(hostModelExecute, request, &response); failure != nil {
+	failure := turn.call(hostModelExecute, request, &response)
+	writeModelJSON(w, response, failure)
+}
+
+func writeModelJSON(w http.ResponseWriter, response hostModelResponse, failure *rpcError) {
+	if failure != nil {
 		writeModelError(w, failure)
 		return
 	}
@@ -269,7 +304,7 @@ func bindModelBody(body []byte, model string) ([]byte, bool, error) {
 	return bound, stream, err
 }
 
-func relayModelStream(ctx context.Context, w http.ResponseWriter, request hostModelRequest, call hostCall) {
+func relayModelStream(ctx context.Context, w http.ResponseWriter, request hostModelRequest, call hostCall, summary *claudeSummary) {
 	var response hostModelResponse
 	if failure := call(hostModelExecuteStream, request, &response); failure != nil {
 		writeModelError(w, failure)
@@ -300,6 +335,10 @@ func relayModelStream(ctx context.Context, w http.ResponseWriter, request hostMo
 	copyModelHeaders(w.Header(), response.Headers)
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		writeModelError(w, &rpcError{Code: "host_model_response", Message: "CPA returned an unsuccessful model stream response", HTTPStatus: response.StatusCode})
+		return
+	}
+	if summary != nil {
+		summary.finish(ctx, w, target, call)
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")

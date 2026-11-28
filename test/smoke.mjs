@@ -30,6 +30,10 @@ const model = 'existing-cpa-model';
 const target = 'gpt-5.4';
 const foldMarker = 'SHOULD_BE_FOLDED_';
 const foldSummary = 'The earlier test turns discussed workspace setup, model routing and synthetic results. The remaining turns verify that the new context keeps its recent messages.';
+const preflightModel = 'claude-sonnet-4-5';
+const preflightSummary = 'VISIBLE_PREFLIGHT: Earlier turns selected the synthetic batch size and verified the fixture.';
+const hiddenReasoning = 'SYNTHETIC_REASONING_MUST_NOT_BE_USED_AS_A_SUMMARY';
+let summaryMode;
 let requestedFold = false;
 let streamTail;
 
@@ -42,6 +46,16 @@ const upstream = createServer(async (req, res) => {
 		const base = { id: 'chatcmpl-smoke', created: 1, model: body.model };
 		if (body.stream) {
 			res.writeHead(200, { 'content-type': 'text/event-stream' });
+			if (summaryMode && !body.tools?.length) {
+				const chunks = [{ role: 'assistant', reasoning_content: hiddenReasoning }];
+				if (summaryMode === 'visible') chunks.push({ content: preflightSummary });
+				chunks.push({});
+				for (const [i, delta] of chunks.entries()) {
+					const choice = { index: 0, delta, finish_reason: i === chunks.length - 1 ? 'stop' : null };
+					res.write('data: ' + JSON.stringify({ ...base, object: 'chat.completion.chunk', choices: [choice] }) + '\n\n');
+				}
+				return res.end('data: [DONE]\n\n');
+			}
 			if (!requestedFold && JSON.stringify(body.messages).includes(foldMarker)) {
 				requestedFold = true;
 				const argumentsJSON = JSON.stringify({ content: [{ startId: 'm00001', endId: 'm00004', summary: foldSummary }] });
@@ -55,6 +69,9 @@ const upstream = createServer(async (req, res) => {
 			res.end(`data: ${JSON.stringify({ ...base, object: 'chat.completion.chunk', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`);
 		} else {
 			res.writeHead(200, { 'content-type': 'application/json' });
+			if (summaryMode && !body.tools?.length) {
+				return res.end(JSON.stringify({ ...base, object: 'chat.completion', choices: [{ index: 0, message: { role: 'assistant', content: summaryMode === 'json' ? preflightSummary : null, reasoning_content: hiddenReasoning }, finish_reason: 'stop' }] }));
+			}
 			res.end(JSON.stringify({ ...base, object: 'chat.completion', choices: [{ index: 0, message: { role: 'assistant', content: 'smoke-ok' }, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 } }));
 		}
 	} catch {
@@ -209,7 +226,7 @@ try {
 		};
 		assert.notEqual(await digest(pluginPath), await digest(replacementLibrary), 'Replacement must be a distinct native image built from the same source');
 	}
-	await writeFile(cpaConfig, `host: 127.0.0.1\nport: ${cpaPort}\nauth-dir: ${JSON.stringify(join(scratch, 'auth'))}\napi-keys: [${clientKey}, synthetic-other-client]\nrouting:\n  strategy: fill-first\nremote-management:\n  secret-key: ${managementKey}\n  disable-control-panel: true\nplugins:\n  enabled: true\n  dir: ${JSON.stringify(pluginDir)}\n  configs:\n    omp-billion-context:\n      enabled: true\nopenai-compatibility:\n  - name: fake\n    base-url: ${upstreamUrl}/v1\n    api-key-entries:\n      - api-key: ${upstreamKey}\n      - api-key: synthetic-cpa-backup\n    models:\n      - name: ${target}\n        alias: ${model}\n`);
+	await writeFile(cpaConfig, `host: 127.0.0.1\nport: ${cpaPort}\nauth-dir: ${JSON.stringify(join(scratch, 'auth'))}\napi-keys: [${clientKey}, synthetic-other-client]\nrouting:\n  strategy: fill-first\nremote-management:\n  secret-key: ${managementKey}\n  disable-control-panel: true\nplugins:\n  enabled: true\n  dir: ${JSON.stringify(pluginDir)}\n  configs:\n    omp-billion-context:\n      enabled: true\nopenai-compatibility:\n  - name: fake\n    base-url: ${upstreamUrl}/v1\n    api-key-entries:\n      - api-key: ${upstreamKey}\n      - api-key: synthetic-cpa-backup\n    models:\n      - name: ${target}\n        alias: ${model}\n      - name: ${preflightModel}\n`);
 	const cpa = start(cpaPath, ['-config', cpaConfig, '-local-model', '-password', localPassword], {});
 	await startHeartbeat(cpa, cpaUrl);
 	const managementHeaders = { 'x-management-key': managementKey };
@@ -678,6 +695,42 @@ try {
 		assert.match(text, /smoke-ok/);
 		assert(requests.at(-1).body.tools?.length, 'The reused runtime must still compress supported requests');
 	}
+	for (summaryMode of ['json', 'visible', 'empty']) {
+		const before = requests.length;
+		const history = Array.from({ length: 211 }, (_, i) => ({
+			role: i % 2 ? 'assistant' : 'user',
+			content: Array.from({ length: 470 }, (_, j) => summaryMode + 's' + i + 'p' + j).join(' '),
+		}));
+		const reply = await call('messages', { model: preflightModel, stream: true, max_tokens: 8192, messages: history }, { 'x-acp-session': 'preflight-' + summaryMode });
+		const text = await reply.text();
+		const calls = requests.slice(before).map(r => r.body);
+		const probes = calls.filter(b => !b.tools?.length);
+		assert(probes.length > 0);
+		const streamedProbes = probes.filter(b => b.stream);
+		if (summaryMode === 'json') {
+			assert.equal(streamedProbes.length, 0, 'A usable JSON summary must not trigger the alternate transport');
+		} else {
+			assert.equal(probes.filter(b => !b.stream).length, 1, 'Try the regular JSON summary once before switching');
+			assert(streamedProbes.length > 0);
+		}
+		assert(!text.includes(hiddenReasoning), 'No private reasoning in the client response');
+		const answers = calls.filter(b => b.tools?.length);
+		if (summaryMode !== 'empty') {
+			assert.equal(reply.status, 200, text);
+			assert.match(text, /smoke-ok/);
+			assert.equal(answers.length, 1);
+			const historySent = JSON.stringify(answers[0].messages);
+			assert(historySent.includes(preflightSummary) && historySent.includes(summaryMode + 's210p469'));
+			assert(!historySent.includes(hiddenReasoning));
+		} else {
+			assert.equal(reply.status, 422, text);
+			assert.equal(answers.length, 0, 'Do not dispatch oversized history without a summary');
+			assert(streamedProbes.length <= 3, 'Stop once the engine confirms an unusable summary');
+			assert.equal(new Set(streamedProbes.map(b => JSON.stringify(b.messages))).size, streamedProbes.length, 'Do not reissue an identical empty summary');
+		}
+	}
+	summaryMode = undefined;
+	console.log('Preflight accepted visible summary text and refused the reasoning-only response without forwarding the original history');
 	assert.deepEqual(await runtimeSnapshot(runtimeParent), originalRuntime, 'Warm requests must leave installed runtime files unchanged');
 	await stopCPA(restarted, dataRoot);
 	assert.deepEqual(await engineDirs(), [], 'Both CPA starts must clean their private instances');

@@ -102,6 +102,13 @@ func (p *plugin) execute(req executorRequest) (any, *rpcError) {
 	}()
 	mediaType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if response.StatusCode != http.StatusOK || mediaType != contentType {
+		// A refused summarization is not a gateway fault: bili names the stage
+		// and says whether repeating can help. Flattening it into a generic 502
+		// made the client repeat the whole conversation against a permanent
+		// refusal, and hid which capability failed.
+		if refusal, ok := readPreflightRefusal(response.Body); ok {
+			return nil, refusal.failure(response.StatusCode)
+		}
 		status := response.StatusCode
 		if status < 400 || status > 599 {
 			status = http.StatusBadGateway
@@ -110,6 +117,17 @@ func (p *plugin) execute(req executorRequest) (any, *rpcError) {
 	}
 	headers := http.Header{"Content-Type": {contentType}}
 	if req.Stream {
+		var body io.Reader = response.Body
+		// A held stream was committed before compression finished, so its first
+		// data frame decides whether this is an answer or a refusal. Without the
+		// marker the stream was never held and is forwarded without reading it.
+		if response.Header.Get(preflightHoldHeader) == preflightHolding {
+			read, refusal, refused := peekHeldStream(response.Body)
+			if refused {
+				return nil, refusal.failure(http.StatusOK)
+			}
+			body = read
+		}
 		p.streamMu.Lock()
 		if p.ctx.Err() != nil {
 			p.streamMu.Unlock()
@@ -134,7 +152,7 @@ func (p *plugin) execute(req executorRequest) (any, *rpcError) {
 			}()
 			defer finish()
 			defer response.Body.Close()
-			p.forwardStream(req, response.Body)
+			p.forwardStream(req, body)
 		}()
 		return streamResponse{Headers: headers}, nil
 	}
@@ -144,6 +162,12 @@ func (p *plugin) execute(req executorRequest) (any, *rpcError) {
 	}
 	if len(result) > maxResponseBytes || !json.Valid(result) {
 		return nil, &rpcError{Code: "sidecar_response", Message: "billion-context returned an invalid or oversized JSON response", HTTPStatus: http.StatusBadGateway}
+	}
+	// bili commits 200 headers when compression outlasts its grace period and
+	// writes the refusal into the body afterwards. That body is an error, not an
+	// answer, and returning it would report a successful empty reply.
+	if refusal, ok := parsePreflightRefusal(result); ok {
+		return nil, refusal.failure(http.StatusOK)
 	}
 	return executorResponse{Payload: result, Headers: headers}, nil
 }
