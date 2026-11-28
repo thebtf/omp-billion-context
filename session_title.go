@@ -117,7 +117,7 @@ func isBoilerplate(text string) bool {
 	lower := strings.ToLower(strings.TrimSpace(text))
 	for _, marker := range []string{"current working directory", "current working dir"} {
 		if rest, ok := strings.CutPrefix(lower, marker); ok {
-			if strings.HasPrefix(rest, ":") {
+			if rest == "" || strings.HasPrefix(rest, ":") {
 				return true
 			}
 			if strings.HasPrefix(rest, " ") {
