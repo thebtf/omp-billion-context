@@ -35,7 +35,9 @@ func TestWithBypassSummaryCleansOverviewRecentRows(t *testing.T) {
 		t.Fatalf("rows = %d", len(decoded.Overview.Recent))
 	}
 	first := decoded.Overview.Recent[0]
-	if first["firstBlockHint"] != "Today: 202-11-27; current working dir" {
+	// The date line is the only part of the injected preamble that differs
+	// between sessions, so the repeated working-directory tail is dropped.
+	if first["firstBlockHint"] != "Today: 202-11-27" {
 		t.Fatalf("first hint = %v", first["firstBlockHint"])
 	}
 	if first["id"] != "a1" || first["live"] != true || first["requests"] != float64(3) {

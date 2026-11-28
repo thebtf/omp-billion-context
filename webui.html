@@ -168,11 +168,37 @@
 						background: var(--bg-muted); border-bottom: 1px solid var(--border);
 					}
 					#cpa-webui-notice span { flex: 1 1 12rem; }
-					/* bili fixes every column except SESSION, so the only elastic
-					   track collapsed and titles lost most of their width. */
-					.embed .twide table.data { table-layout: auto; min-width: 0; }
-					.embed .twide table.data colgroup col:first-child { width: auto !important; }
-					.embed .twide .row-title { max-width: none; overflow: visible; text-overflow: clip; }
+					/* Let the title use the full width of its elastic column. */
+					.embed .twide .row-title,
+					.embed .twide .w-title { max-width: none; }
+					.embed .twide .row-title { flex: 0 1 auto; min-width: 0; }
+					.embed .twide .slink {
+						display: flex; align-items: center; column-gap: .4rem; min-width: 0;
+					}
+					.embed .twide .slink > .badge { flex: none; white-space: nowrap; }
+					.embed .twide .row-id {
+						flex: none; margin-top: 0; max-width: 5.5em;
+						font-size: 10.5px; line-height: 1.2;
+					}
+					@media (min-width: 721px) {
+						.embed .twide table.data:not(.columns-resized) colgroup col:nth-child(2) { width: 10rem !important; }
+						.embed .twide .client-cell { white-space: nowrap; overflow: hidden; }
+						.embed .twide .client-cell .w-client { max-width: calc(100% - 3rem); }
+					}
+					@media (max-width: 720px) {
+						.embed .twide table.data th:nth-child(2),
+						.embed .twide table.data td:nth-child(2),
+						.embed .twide table.data th:nth-child(4),
+						.embed .twide table.data td:nth-child(4) { display: none; }
+						.embed .twide table.data colgroup col:nth-child(2),
+						.embed .twide table.data colgroup col:nth-child(4) { width: 0 !important; }
+						.embed .twide .slink { flex-wrap: wrap; align-items: flex-start; row-gap: .15rem; }
+						.embed .twide .row-title {
+							flex: 1 1 100%;
+							display: -webkit-box; -webkit-box-orient: vertical;
+							-webkit-line-clamp: 2; white-space: normal;
+						}
+					}
 				`;
 				document.head.append(style);
 				const notice = document.createElement('aside');
@@ -186,6 +212,36 @@
 					location.reload();
 				});
 				document.body.prepend(notice);
+
+				// Keep native links and keyboard navigation when bili replaces the table body.
+				const decorateRows = () => {
+					const historyLabel = document.querySelector('#ses-state option[value="history"]')?.textContent || 'History';
+					for (const body of document.querySelectorAll('#sessions-body, #recent-body')) {
+						for (const anchor of body.querySelectorAll('a.slink')) {
+							if (anchor.dataset.ompDecorated) continue;
+							anchor.dataset.ompDecorated = '1';
+							const name = anchor.querySelector('.row-title');
+							const handle = anchor.querySelector('.row-id');
+							const cells = anchor.closest('td')?.parentElement?.children || [];
+							const client = cells[1]?.textContent.trim();
+							const upstream = cells[3]?.textContent.trim();
+							const lines = [name?.textContent, client, upstream, handle?.textContent].filter(Boolean);
+							if (lines.length) anchor.title = lines.join('\n');
+							if (!anchor.querySelector('.badge.live')) {
+								const chip = document.createElement('span');
+								chip.className = 'badge disk';
+								chip.textContent = historyLabel;
+								anchor.insertBefore(chip, handle || null);
+							}
+						}
+					}
+				};
+				const rowObserver = new MutationObserver(decorateRows);
+				for (const body of document.querySelectorAll('#sessions-body, #recent-body')) {
+					rowObserver.observe(body, {childList: true});
+				}
+				decorateRows();
+
 				window.addEventListener('pagehide', () => {key = '';}, {once: true});
 				window.addEventListener('pageshow', event => {
 					if (event.persisted) location.reload();

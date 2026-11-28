@@ -25,6 +25,38 @@ func TestSessionTitleDropsConversationTags(t *testing.T) {
 	}
 }
 
+func TestSessionTitleKeepsAWholeTitleThatContainsADash(t *testing.T) {
+	const raw = "BILI-010 — fix the session list"
+	if got := sessionTitle(raw); got != raw {
+		t.Fatalf("sessionTitle(%q) = %q, want it whole", raw, got)
+	}
+}
+
+func TestSessionTitleCutsOnlyTheScaffoldingBeforeTheTurn(t *testing.T) {
+	const raw = "Today: 2026-11-28 — make the list readable"
+	if got := sessionTitle(raw); got != "make the list readable" {
+		t.Fatalf("sessionTitle(%q) = %q, want the turn after the preamble", raw, got)
+	}
+}
+
+// The list decides how much fits and the tooltip keeps the whole string, so the
+// bridge must not shorten a title on its way through.
+func TestSessionTitleNeverShortensALongTitle(t *testing.T) {
+	raw := strings.TrimSpace(strings.Repeat("readable naming ", 20))
+	if got := sessionTitle(raw); got != raw {
+		t.Fatalf("a %d-rune title came back as %d runes", len(raw), len(got))
+	}
+}
+
+// Every session of a project opens with the same working directory and the same
+// instruction reminder; only the date tells them apart.
+func TestSessionTitleDropsTheRepeatedPreambleTail(t *testing.T) {
+	raw := "<system-reminder> Today: 2026-11-28; current working dir D:\\work; do not repeat this information"
+	if got := sessionTitle(raw); got != "Today: 2026-11-28" {
+		t.Fatalf("sessionTitle(%q) = %q", raw, got)
+	}
+}
+
 func TestSessionTitleKeepsOrdinaryComparisonOperators(t *testing.T) {
 	const raw = "why is a > b and x<y in this diff"
 	got := sessionTitle(raw)
