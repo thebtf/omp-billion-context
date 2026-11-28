@@ -1,56 +1,44 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
+import { setImmediate as tick } from 'node:timers/promises';
 
 const html = readFileSync(new URL('../webui.html', import.meta.url), 'utf8');
+const source = html.match(/<script>([\s\S]+?)<\/script>/)[1];
+const keyName = 'omp-billion-context.management-key';
+const fixtureKey = 'synthetic-management';
+const overview = { sessions: 0, blocks: 0, tokensSaved: 0, recent: [], visibilityMarkers: true };
 
-const keyRemoval = /localStorage\.removeItem\(savedKey\)[\s\S]{0,120}sessionStorage\.removeItem\(savedKey\)/;
-assert.match(html, keyRemoval, 'Locking must drop the pre-upgrade sessionStorage copy as well');
-
-const matched = html.match(/addEventListener\('storage',\s*event\s*=>\s*\{([\s\S]*?)\}\);/);
-assert.ok(matched, 'Cross-tab lock needs a storage listener');
-
-const listenerAt = html.indexOf("addEventListener('storage'");
-const openAt = html.indexOf('async function open(');
-assert.ok(listenerAt > 0 && openAt > 0, 'Both the listener and open() must exist');
-assert.ok(listenerAt < openAt, 'The lock listener must be installed before any open can start');
-
-const savedKey = 'omp-billion-context.management-key';
-
-// The shipped handler mutates the closure variables `key` and `openGeneration`,
-// so the harness mirrors them onto the state object it passes in.
-function dispatch(event, state) {
-  const handler = new Function('event', 'savedKey', 'scope', 'location', `
-    let key = scope.key;
-    let openGeneration = scope.openGeneration;
-    ${matched[1]}
-    scope.key = key;
-    scope.openGeneration = openGeneration;
-  `);
-  handler(event, savedKey, state, { reload: () => { state.reloaded += 1; } });
+function tab(fetch, persisted = new Map()) {
+	const listeners = new Map(); let reloaded = 0;
+	const storage = data => ({ getItem: k => data.get(k) ?? null, setItem: (k, v) => data.set(k, v), removeItem: k => data.delete(k) });
+	const node = tag => ({
+		tag, childNodes: [], attrs: {}, events: {}, dataset: {}, value: '',
+		append(child) { this.childNodes.push(child) }, replaceChildren(...children) { this.childNodes = children },
+		setAttribute(k, v) { this.attrs[k] = v }, removeAttribute(k) { delete this.attrs[k] },
+		addEventListener(k, v) { this.events[k] = v }, focus() { document.activeElement = this }
+	});
+	const document = { body: node('body'), documentElement: node('html'), createElement: node, activeElement: null };
+	const find = (fn, n = document.body) => { if (fn(n)) return n; for (const c of n.childNodes ?? []) { const found = find(fn, c); if (found) return found } };
+	const item = id => find(n => n.id === id);
+	const location = { hash: '', reload() { reloaded++ } };
+	const window = { fetch, addEventListener: (k, fn) => listeners.set(k, fn) };
+	const session = new Map(); runInNewContext(source, { document, window, location, history: { replaceState() { } }, localStorage: storage(persisted), sessionStorage: storage(session), navigator: { language: 'en' }, URLSearchParams, AbortSignal, Intl, console });
+	return {
+		persisted, session, item, get reloaded() { return reloaded }, storageEvent: (key, newValue) => listeners.get('storage')({ key, newValue }),
+		login(value) { item('management-key').value = value; find(n => n.tag === 'form').events.submit({ preventDefault() { } }) },
+		click(id) { item(id).events.click({ preventDefault() { } }) }
+	};
 }
 
-const unrelated = { key: 'live', openGeneration: 1, reloaded: 0 };
-dispatch({ key: 'another-key', newValue: null }, unrelated);
-assert.equal(unrelated.key, 'live', 'An unrelated key must not revoke access');
-assert.equal(unrelated.reloaded, 0, 'An unrelated key must not reload the tab');
-
-const freshLogin = { key: 'old', openGeneration: 1, reloaded: 0 };
-dispatch({ key: savedKey, newValue: 'new-key' }, freshLogin);
-assert.equal(freshLogin.key, 'old', 'A new value is a fresh login, not a lock');
-assert.equal(freshLogin.reloaded, 0, 'A fresh login must not reload another tab');
-
-const locked = { key: 'live', openGeneration: 1, reloaded: 0 };
-dispatch({ key: savedKey, newValue: null }, locked);
-assert.equal(locked.key, '', 'A lock in another tab must clear the key');
-assert.equal(locked.reloaded, 1, 'The locked tab must reload to drop rendered data');
-assert.equal(locked.openGeneration, 2, 'A pending open must be invalidated by the lock');
-
-// Every await point in open() must re-check the generation before it can store
-// the key or paint the authenticated UI.
-const openBody = html.slice(openAt);
-const guards = openBody.match(/if \(generation !== openGeneration\) return;/g) ?? [];
-assert.ok(guards.length >= 4, `open() needs a generation guard after each await, found ${guards.length}`);
-assert.match(openBody, /if \(generation !== openGeneration\) return;\s*try \{localStorage\.setItem\(savedKey, candidate\);/,
-  'The key must not be stored by an open that a lock invalidated');
-
-console.log('Cross-tab lock clears the key, invalidates pending opens, and reloads; unrelated and fresh-login events are ignored');
+const response = (status, result = overview) => ({ status, ok: status === 200, json: async () => result });
+const auth = async (_url, init) => response(init.headers['X-Management-Key'] === fixtureKey ? 200 : 401);
+const a = tab(auth); a.login('wrong'); await tick(); assert.equal(a.persisted.has(keyName), false); assert(a.item('management-key'));
+a.login(fixtureKey); await tick(); assert.equal(a.persisted.get(keyName), fixtureKey); assert(a.item('cache-share'));
+a.click('dismiss-notice'); assert.equal(a.item('priority-notice'), undefined);
+const b = tab(auth, a.persisted); await tick(); assert(b.item('cache-share')); assert.equal(b.item('priority-notice'), undefined);
+a.session.set(keyName, fixtureKey); a.click('lock'); assert(!a.persisted.has(keyName)); assert(!a.session.has(keyName));
+b.storageEvent('unrelated', null); b.storageEvent(keyName, 'other'); assert.equal(b.reloaded, 0); b.storageEvent(keyName, null); assert.equal(b.reloaded, 1);
+let finish;
+const pending = tab(() => new Promise(resolve => { finish = resolve })); pending.login(fixtureKey); pending.storageEvent(keyName, null); finish(response(200)); await tick(); assert.equal(pending.persisted.has(keyName), false); assert.equal(pending.item('cache-share'), undefined);
+console.log('Verified accepted and rejected credentials, durable dismissal, cross-tab lock and lock during pending login.');

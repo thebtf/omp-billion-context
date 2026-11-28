@@ -5,8 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
-	"mime"
 	"net"
 	"net/http"
 	"time"
@@ -18,158 +16,98 @@ const (
 	maxResponseBytes = 64 << 20
 )
 
-func sidecarClient(address string) *http.Client {
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
-	return &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-				return dialer.DialContext(ctx, network, address)
-			},
-			DisableCompression:     true,
-			IdleConnTimeout:        30 * time.Second,
-			ResponseHeaderTimeout:  90 * time.Second,
-			MaxIdleConnsPerHost:    8,
-			MaxResponseHeaderBytes: 64 << 10,
-		},
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
-}
-
 func (p *plugin) execute(req executorRequest) (any, *rpcError) {
-	path := paths[req.SourceFormat]
 	original := req.OriginalRequest
 	if len(original) == 0 {
 		original = req.Payload
 	}
 	session, groups := requestSession(req.Model, req.SourceFormat, req.Headers, req.Metadata, original)
-	if session == "" || path == "" || req.SourceFormat != req.Format || req.Alt != "" || !json.Valid(req.Payload) {
-		return nil, &rpcError{Code: "unsupported_request", Message: "request cannot be compressed safely", HTTPStatus: http.StatusBadRequest}
+	if session == "" || paths[req.SourceFormat] == "" || req.SourceFormat != req.Format || req.Alt != "" || !json.Valid(req.Payload) {
+		return nil, kernelError("unsupported_request", "Request cannot be compressed safely", 400)
 	}
-	// CPA can supply a normalized execution payload as well as the original
-	// wire request. Never discard its normalization, or let it introduce an
-	// unchecked opaque group between admission and the relay.
 	if req.SourceFormat == responses && !bytes.Equal(original, req.Payload) {
 		reason, _, actual := classify(req.Model, responses, req.Headers, req.Metadata, req.Payload)
-		if reason != compressible || len(actual) != len(groups) || (len(groups) != 0 && !groups.intact(req.Payload)) {
-			return nil, &rpcError{Code: "unsupported_request", Message: "incompatible Responses execution payload", HTTPStatus: http.StatusBadRequest}
+		if reason != compressible || len(actual) != len(groups) || (len(groups) > 0 && !groups.intact(req.Payload)) {
+			return nil, kernelError("unsupported_request", "Incompatible Responses execution payload", 400)
 		}
 	}
-	timeout, contentType := nonStreamTimeout, "application/json"
+	timeout := nonStreamTimeout
 	if req.Stream {
-		timeout, contentType = streamTimeout, "text/event-stream"
+		timeout = streamTimeout
 	}
 	ctx, cancel := context.WithTimeout(p.ctx, timeout)
-	running, relay, err := p.runningEngine(ctx)
-	if err != nil {
-		cancel()
-		return nil, engineFailure(err)
-	}
-	var guard *replayGuard
-	if len(groups) != 0 {
-		guard = &replayGuard{original: req.Payload, groups: groups, stream: req.Stream, fallbacks: &p.protectedFallbacks}
-	}
-	origin, release, err := relay.begin(ctx, req, guard, p.call)
+	unlock, err := p.turns.lock(ctx, session)
 	if err != nil {
 		cancel()
 		return nil, sidecarFailure(err)
 	}
-	finish := func() { cancel(); release() }
-	detached := false
-	defer func() {
-		if !detached {
-			finish()
+	finish := func() { unlock(); cancel() }
+	turn := kernelTurn{p: p, req: req, session: session, groups: groups, client: toolNames(req.Payload), original: req.Payload}
+	if !req.Stream {
+		defer finish()
+		payload, f := turn.run(ctx, nil)
+		if f != nil {
+			return nil, f
 		}
-	}()
-	destination := running.url
-	destination.Path = "/bili/" + origin + path
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, destination.String(), bytes.NewReader(req.Payload))
-	if err != nil {
-		return nil, sidecarFailure(err)
+		return executorResponse{Payload: payload, Headers: http.Header{"Content-Type": {"application/json"}}}, nil
 	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Accept", contentType)
-	request.Header.Set("X-Acp-Session", session)
-	request.Header.Set("User-Agent", pluginID)
-	request.Header.Set("X-Omp-Bili-Access", running.token)
-	response, err := running.client.Do(request)
-	if err != nil {
-		return nil, sidecarFailure(err)
-	}
-	defer func() {
-		if !detached {
-			_ = response.Body.Close()
-		}
-	}()
-	mediaType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	if response.StatusCode != http.StatusOK || mediaType != contentType {
-		// A refused summarization is not a gateway fault: bili names the stage
-		// and says whether repeating can help. Flattening it into a generic 502
-		// made the client repeat the whole conversation against a permanent
-		// refusal, and hid which capability failed.
-		if refusal, ok := readPreflightRefusal(response.Body); ok {
-			return nil, refusal.failure(response.StatusCode)
-		}
-		status := response.StatusCode
-		if status < 400 || status > 599 {
-			status = http.StatusBadGateway
-		}
-		return nil, &rpcError{Code: "sidecar_response", Message: "billion-context could not complete the CPA model request", HTTPStatus: status}
-	}
-	headers := http.Header{"Content-Type": {contentType}}
-	if req.Stream {
-		var body io.Reader = response.Body
-		// A held stream was committed before compression finished, so its first
-		// data frame decides whether this is an answer or a refusal. Without the
-		// marker the stream was never held and is forwarded without reading it.
-		if response.Header.Get(preflightHoldHeader) == preflightHolding {
-			read, refusal, refused := peekHeldStream(response.Body)
-			if refused {
-				return nil, refusal.failure(http.StatusOK)
-			}
-			body = read
-		}
-		p.streamMu.Lock()
-		if p.ctx.Err() != nil {
-			p.streamMu.Unlock()
-			return nil, sidecarFailure(context.Canceled)
-		}
-		p.streams.Add(1)
-		if p.streamCount == 0 {
-			p.streamIdle = make(chan struct{})
-		}
-		p.streamCount++
+	p.streamMu.Lock()
+	if p.ctx.Err() != nil {
 		p.streamMu.Unlock()
-		detached = true
-		go func() {
-			defer func() {
-				p.streamMu.Lock()
-				p.streamCount--
-				if p.streamCount == 0 {
-					close(p.streamIdle)
-				}
-				p.streamMu.Unlock()
-				p.streams.Done()
-			}()
-			defer finish()
-			defer response.Body.Close()
-			p.forwardStream(req, body)
+		finish()
+		return nil, sidecarFailure(context.Canceled)
+	}
+	p.streams.Add(1)
+	if p.streamCount == 0 {
+		p.streamIdle = make(chan struct{})
+	}
+	p.streamCount++
+	p.streamMu.Unlock()
+	ready := make(chan *rpcError, 1)
+	go func() {
+		defer finish()
+		defer func() {
+			p.streamMu.Lock()
+			p.streamCount--
+			if p.streamCount == 0 {
+				close(p.streamIdle)
+			}
+			p.streamMu.Unlock()
+			p.streams.Done()
 		}()
-		return streamResponse{Headers: headers}, nil
+		started := false
+		_, f := turn.run(ctx, func(chunk []byte) error {
+			if !started {
+				started = true
+				ready <- nil
+			}
+			if fail := p.call("host.stream.emit", streamEmit{StreamID: req.StreamID, Payload: chunk}, nil); fail != nil {
+				return errors.New("CPA could not deliver stream event")
+			}
+			return nil
+		})
+		if !started && f != nil {
+			ready <- f
+			return
+		}
+		if !started {
+			ready <- nil
+		}
+		closeMsg := streamClose{StreamID: req.StreamID}
+		if f != nil {
+			closeMsg.Error = f.Message
+		}
+		p.call("host.stream.close", closeMsg, nil)
+	}()
+	select {
+	case f := <-ready:
+		if f != nil {
+			return nil, f
+		}
+		return streamResponse{Headers: http.Header{"Content-Type": {"text/event-stream"}}}, nil
+	case <-ctx.Done():
+		return nil, sidecarFailure(ctx.Err())
 	}
-	result, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
-	if err != nil {
-		return nil, sidecarFailure(err)
-	}
-	if len(result) > maxResponseBytes || !json.Valid(result) {
-		return nil, &rpcError{Code: "sidecar_response", Message: "billion-context returned an invalid or oversized JSON response", HTTPStatus: http.StatusBadGateway}
-	}
-	// bili commits 200 headers when compression outlasts its grace period and
-	// writes the refusal into the body afterwards. That body is an error, not an
-	// answer, and returning it would report a successful empty reply.
-	if refusal, ok := parsePreflightRefusal(result); ok {
-		return nil, refusal.failure(http.StatusOK)
-	}
-	return executorResponse{Payload: result, Headers: headers}, nil
 }
 
 func engineFailure(err error) *rpcError {

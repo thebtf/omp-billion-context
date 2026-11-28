@@ -4,7 +4,6 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
@@ -12,9 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
-	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,15 +24,11 @@ import (
 //go:embed all:bundle
 var bundledRuntime embed.FS
 
-//go:embed private-runtime.mjs
-var privateRuntime []byte
-
 const (
 	engineStartupTimeout = 20 * time.Second
 	// A foreign CPA process may still be draining the shared store.
 	sessionsLockWait   = 3 * time.Second
 	engineFlushTimeout = 12 * time.Second
-	failedFlushTimeout = 3 * time.Second
 )
 
 var (
@@ -48,7 +40,7 @@ var (
 
 type runtimeManifest struct {
 	Schema        int              `json:"schema"`
-	BiliVersion   string           `json:"bili_version"`
+	KernelVersion string           `json:"kernel_version"`
 	NodeVersion   string           `json:"node_version"`
 	Platform      string           `json:"platform"`
 	ArchiveSHA256 string           `json:"archive_sha256"`
@@ -56,24 +48,24 @@ type runtimeManifest struct {
 }
 
 func (m runtimeManifest) identity() string {
-	return m.BiliVersion + "-" + m.NodeVersion + "-" + m.Platform + "-" + m.ArchiveSHA256
+	return m.KernelVersion + "-" + m.NodeVersion + "-" + m.Platform + "-" + m.ArchiveSHA256
 }
 
 func (m runtimeManifest) validate() error {
-	for _, value := range []string{m.BiliVersion, m.NodeVersion, m.Platform} {
+	for _, value := range []string{m.KernelVersion, m.NodeVersion, m.Platform} {
 		if value == "" || len(value) > 40 || strings.Trim(value, "abcdefghijklmnopqrstuvwxyz0123456789.-") != "" {
 			return errors.New("invalid bundled runtime identity")
 		}
 	}
 	digest, err := hex.DecodeString(m.ArchiveSHA256)
-	if m.Schema != 1 || err != nil || len(digest) != sha256.Size || strings.ToLower(m.ArchiveSHA256) != m.ArchiveSHA256 || m.Platform != runtime.GOOS+"-"+runtime.GOARCH {
+	if m.Schema != 2 || err != nil || len(digest) != sha256.Size || strings.ToLower(m.ArchiveSHA256) != m.ArchiveSHA256 || m.Platform != runtime.GOOS+"-"+runtime.GOARCH {
 		return errors.New("invalid bundled runtime manifest")
 	}
 	node := "node"
 	if runtime.GOOS == "windows" {
 		node += ".exe"
 	}
-	for _, name := range []string{node, "node_modules/billion-context/dist/index.js"} {
+	for _, name := range []string{node, "kernel/worker.mjs", "kernel/host.mjs", "kernel/store.mjs", "kernel/cache.mjs", "node_modules/acp-kernel/dist/index.js", "node_modules/acp-kernel/package.json"} {
 		if m.Required[name] <= 0 {
 			return errors.New("bundled runtime manifest omits an executable entry")
 		}
@@ -206,21 +198,6 @@ func (s *sessionStore) release() {
 	})
 }
 
-// engineStoreEnv pins bili's storage posture. One plain-JSON envelope per
-// session is the only persistent copy: the unified sqlite sidecar would add a
-// second durable file set (index.db plus -wal/-shm/-chk) whose bootstrap can
-// fetch better-sqlite3 from npm. Retention stays bili's own default — the card
-// asks for a session that survives a restart, not for a different eviction
-// policy.
-func engineStoreEnv(directory string) []string {
-	return []string{
-		"BILI_SESSIONS_DIR=" + directory,
-		"BILI_PERSIST=1",
-		"BILI_STORAGE_UNIFIED=legacy",
-		"BILI_SQLITE_AUTO_DOWNLOAD=0",
-	}
-}
-
 func validateRuntimeFiles(ctx context.Context, root string, manifest runtimeManifest) error {
 	for name, size := range manifest.Required {
 		if err := ctx.Err(); err != nil {
@@ -267,7 +244,7 @@ func installedRuntime(ctx context.Context, root string, manifest runtimeManifest
 		return false, errors.Join(errRuntimeCorrupt, err)
 	}
 	var marker runtimeManifest
-	if json.Unmarshal(data, &marker) != nil || marker.Schema != manifest.Schema || marker.BiliVersion != manifest.BiliVersion || marker.NodeVersion != manifest.NodeVersion || marker.Platform != manifest.Platform || marker.ArchiveSHA256 != manifest.ArchiveSHA256 || len(marker.Required) != len(manifest.Required) {
+	if json.Unmarshal(data, &marker) != nil || marker.Schema != manifest.Schema || marker.KernelVersion != manifest.KernelVersion || marker.NodeVersion != manifest.NodeVersion || marker.Platform != manifest.Platform || marker.ArchiveSHA256 != manifest.ArchiveSHA256 || len(marker.Required) != len(manifest.Required) {
 		return false, errRuntimeCorrupt
 	}
 	for name, size := range manifest.Required {
@@ -381,17 +358,12 @@ func (e *engineStartupError) Unwrap() error {
 }
 
 type engine struct {
-	url    url.URL
-	client *http.Client
+	worker *kernelProcess
 	stop   func()
 	done   <-chan struct{}
-	token  string
 }
 
 func (e engine) close() {
-	if e.client != nil {
-		e.client.CloseIdleConnections()
-	}
 	if e.stop != nil {
 		e.stop()
 	}
@@ -427,161 +399,79 @@ func startEngineAt(startupCtx, lifetimeCtx context.Context, dataRoot string) (en
 	if err != nil {
 		return engine{}, &engineStartupError{stage: "extract", cause: err}
 	}
-	instances := filepath.Join(dataRoot, "instances")
-	if err := os.MkdirAll(instances, 0o700); err != nil {
-		return engine{}, &engineStartupError{stage: "start", cause: err}
-	}
-	root, err := os.MkdirTemp(instances, "instance-")
-	if err != nil {
-		return engine{}, &engineStartupError{stage: "start", cause: err}
-	}
-	kept := false
-	defer func() {
-		if !kept {
-			_ = os.RemoveAll(root)
-		}
-	}()
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		return engine{}, &engineStartupError{stage: "start", cause: err}
-	}
-	defer listener.Close()
-	addr := listener.Addr().(*net.TCPAddr)
-	address := addr.String()
-	client := sidecarClient(address)
-	stateRoot := root
-	// The shared session store outlives the private generation. Failing to claim
-	// it fails the start: serving an unpersisted engine would silently lose the
-	// history the operator asked to keep.
 	store, err := claimSessionStore(startupCtx, dataRoot, sessionsLockWait)
 	if err != nil {
 		return engine{}, &engineStartupError{stage: "storage", cause: err}
 	}
-	// The lock is handed over only once the engine process is gone: either the
-	// stop path below or a failed start.
+	keep := false
 	defer func() {
-		if !kept {
+		if !keep {
 			store.release()
 		}
 	}()
-	sessionsDir := store.dir
-	configPath := filepath.Join(root, "bili.json")
-	cfg, err := json.Marshal(map[string]any{
-		"host": "127.0.0.1", "port": addr.Port, "upstream": "http://127.0.0.1:1", "logFile": "off",
-		"mitm": map[string]bool{"enabled": false},
-	})
-	if err != nil {
-		return engine{}, &engineStartupError{stage: "start", cause: err}
-	}
-	if err := os.WriteFile(configPath, cfg, 0o600); err != nil {
-		return engine{}, &engineStartupError{stage: "start", cause: err}
-	}
-	var secret [32]byte
-	if _, err := rand.Read(secret[:]); err != nil {
-		return engine{}, &engineStartupError{stage: "start", cause: err}
-	}
-	token, proof := hex.EncodeToString(secret[:16]), hex.EncodeToString(secret[16:])
-	watch := filepath.Join(root, "private-runtime.mjs")
-	if err := os.WriteFile(watch, privateRuntime, 0o600); err != nil {
-		return engine{}, &engineStartupError{stage: "start", cause: err}
-	}
 	node := "node"
 	if runtime.GOOS == "windows" {
 		node += ".exe"
 	}
-	entry := filepath.Join(runtimeRoot, "node_modules", "billion-context", "dist", "index.js")
-	preload := runtimeFileURL(watch)
-	childCtx, cancelChild := context.WithCancel(context.WithoutCancel(lifetimeCtx))
-	defer func() {
-		if !kept {
-			cancelChild()
-		}
-	}()
-	cmd := exec.CommandContext(childCtx, filepath.Join(runtimeRoot, node), "--import", preload.String(), entry, "start", "--config", configPath, "--no-auto-update", "--no-passthrough")
-	cmd.Dir = root
-	cmd.Env = append(engineEnv(), "BILI_STRICT_PORT="+stringPort(addr),
-		"XDG_CONFIG_HOME="+stateRoot, "XDG_DATA_HOME="+stateRoot, "XDG_STATE_HOME="+stateRoot, "XDG_CACHE_HOME="+stateRoot,
-		"BILI_RESUME_INHERITANCE=0", "BILI_FORK_ADOPTION=0", "BILI_ADVISORY_CHECK=0", "BILI_RELEASE_NOTES_CHECK=0", "OMP_ENGINE_TOKEN="+token, "OMP_ENGINE_PROOF="+proof)
-	cmd.Env = append(cmd.Env, engineStoreEnv(sessionsDir)...)
+	cmd := exec.Command(filepath.Join(runtimeRoot, node), filepath.Join(runtimeRoot, "kernel", "worker.mjs"), store.dir)
+	cmd.Dir = runtimeRoot
+	cmd.Env = engineEnv()
 	configureProcess(cmd)
-	parent, err := cmd.StdinPipe()
+	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		return engine{}, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		stdin.Close()
+		return engine{}, err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		stdin.Close()
+		stdout.Close()
+		return engine{}, err
+	}
+	if err = startupCtx.Err(); err == nil {
+		err = startWithSessionLease(cmd, store.lock)
+	}
+	if err != nil {
+		stdin.Close()
+		stdout.Close()
+		stderr.Close()
 		return engine{}, &engineStartupError{stage: "start", cause: err}
 	}
-	defer func() {
-		if !kept {
-			_ = parent.Close()
-		}
-	}()
-	if err := listener.Close(); err != nil {
-		return engine{}, &engineStartupError{stage: "start", cause: err}
-	}
-	if err := startupCtx.Err(); err != nil {
-		return engine{}, &engineStartupError{stage: "start", cause: err}
-	}
-	if err := startWithSessionLease(cmd, store.lock); err != nil {
-		return engine{}, &engineStartupError{stage: "start", cause: err}
-	}
+	worker := newKernelProcess(stdin, stdout, stderr)
 	done := make(chan struct{})
-	go func() {
-		_ = cmd.Wait()
-		close(done)
-	}()
-	var stopOnce sync.Once
-	// An engine that never became healthy gets a short leash: it has nothing
-	// worth flushing and must not hold a cancelled startup for seconds.
-	flushBudget := failedFlushTimeout
+	go func() { _ = cmd.Wait(); close(done) }()
+	var once sync.Once
 	stop := func() {
-		stopOnce.Do(func() {
-			// Closing stdin tells the preload to hand bili its own SIGTERM, so
-			// the engine drains and fsyncs its envelopes before exiting. Idle
-			// connections go first: bili's drain waits for open sockets.
-			client.CloseIdleConnections()
-			_ = parent.Close()
+		once.Do(func() {
+			worker.close()
 			select {
 			case <-done:
-			case <-time.After(flushBudget):
-				cancelChild()
+			case <-time.After(engineFlushTimeout):
+				_ = cmd.Process.Kill()
 				<-done
 			}
-			cancelChild()
 			store.release()
-			_ = os.RemoveAll(root)
 		})
 	}
-	endpoint := url.URL{Scheme: "http", Host: address}
-	if err := waitForEngine(startupCtx, client, endpoint.String()+"/__bili/health", proof, done); err != nil {
-		cancelChild()
+	var reply struct{ Ready bool }
+	if err = worker.call(startupCtx, "ping", nil, &reply); err == nil && !reply.Ready {
+		err = errKernelProtocol
+	}
+	if err != nil {
+		_ = cmd.Process.Kill()
 		stop()
-		client.CloseIdleConnections()
-		return engine{}, &engineStartupError{stage: "health", cause: err}
+		return engine{}, &engineStartupError{stage: "startup", cause: err}
 	}
-	flushBudget = engineFlushTimeout
-	kept = true
-	return engine{url: endpoint, client: client, stop: stop, done: done, token: token}, nil
-}
-
-func runtimeFileURL(path string) url.URL {
-	path = filepath.ToSlash(path)
-	if runtime.GOOS == "windows" {
-		if strings.HasPrefix(path, "//?/") {
-			path = strings.TrimPrefix(path, "//?/")
-			if len(path) >= 4 && strings.EqualFold(path[:4], "UNC/") {
-				path = "//" + path[4:]
-			}
-		}
-		if strings.HasPrefix(path, "//") {
-			host, rest, _ := strings.Cut(path[2:], "/")
-			return url.URL{Scheme: "file", Host: host, Path: "/" + rest}
-		}
-		path = "/" + path
+	if err = lifetimeCtx.Err(); err != nil {
+		stop()
+		return engine{}, err
 	}
-	return url.URL{Scheme: "file", Path: path}
-}
-
-func stringPort(addr *net.TCPAddr) string {
-	_, port, _ := net.SplitHostPort(addr.String())
-	return port
+	keep = true
+	return engine{worker: worker, done: done, stop: stop}, nil
 }
 
 func engineEnv() []string {
@@ -592,33 +482,6 @@ func engineEnv() []string {
 		}
 	}
 	return env
-}
-
-func waitForEngine(ctx context.Context, client *http.Client, health, proof string, done <-chan struct{}) error {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-done:
-			return errEngineExited
-		case <-ticker.C:
-			probe, cancel := context.WithTimeout(ctx, time.Second)
-			req, _ := http.NewRequestWithContext(probe, http.MethodGet, health, nil)
-			resp, err := client.Do(req)
-			if err == nil {
-				var payload struct{ OK bool }
-				_ = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&payload)
-				_ = resp.Body.Close()
-				if resp.StatusCode == http.StatusOK && payload.OK && resp.Header.Get("X-Omp-Bili-Proof") == proof {
-					cancel()
-					return ctx.Err()
-				}
-			}
-			cancel()
-		}
-	}
 }
 
 func unpackRuntime(ctx context.Context, root string, data []byte) error {

@@ -149,13 +149,9 @@ func (l *nativeLifecycle) quiesce() *rpcError {
 		attempt := generation.attempt
 		generation.engineMu.Unlock()
 		if attempt != nil {
+			// A startup still in flight owns the interpreter and the store
+			// lease; stopping under it would race the start it is waiting for.
 			drained = wait(attempt.done)
-			if drained && attempt.relay != nil {
-				attempt.relay.mu.Lock()
-				relayIdle := attempt.relay.idle
-				attempt.relay.mu.Unlock()
-				drained = wait(relayIdle)
-			}
 		}
 	}
 	if !drained {

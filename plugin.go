@@ -86,11 +86,11 @@ type hostCall func(method string, payload any, into any) *rpcError
 type engineAttempt struct {
 	done   chan struct{}
 	engine engine
-	relay  *modelRelay
 	err    error
 }
 
 type plugin struct {
+	turns              sessionTurns
 	engineMu           sync.Mutex
 	attempt            *engineAttempt
 	startEngine        func(startupCtx, lifetimeCtx context.Context) (engine, error)
@@ -115,14 +115,14 @@ func newPlugin(call hostCall) *plugin {
 	return &plugin{call: call, ctx: ctx, cancel: cancel, startEngine: startEngine, streamIdle: idle}
 }
 
-func (p *plugin) runningEngine(ctx context.Context) (engine, *modelRelay, error) {
+func (p *plugin) runningEngine(ctx context.Context) (engine, error) {
 	if err := ctx.Err(); err != nil {
-		return engine{}, nil, err
+		return engine{}, err
 	}
 	p.engineMu.Lock()
 	if err := p.ctx.Err(); err != nil {
 		p.engineMu.Unlock()
-		return engine{}, nil, err
+		return engine{}, err
 	}
 	if p.attempt == nil {
 		p.attempt = &engineAttempt{done: make(chan struct{})}
@@ -133,16 +133,16 @@ func (p *plugin) runningEngine(ctx context.Context) (engine, *modelRelay, error)
 
 	select {
 	case <-ctx.Done():
-		return engine{}, nil, ctx.Err()
+		return engine{}, ctx.Err()
 	case <-p.ctx.Done():
-		return engine{}, nil, p.ctx.Err()
+		return engine{}, p.ctx.Err()
 	case <-attempt.done:
 	}
 	if err := ctx.Err(); err != nil {
-		return engine{}, nil, err
+		return engine{}, err
 	}
 	if err := p.ctx.Err(); err != nil {
-		return engine{}, nil, err
+		return engine{}, err
 	}
 	if attempt.err != nil {
 		// A held session store is expected to free up: the other CPA process owns
@@ -155,13 +155,13 @@ func (p *plugin) runningEngine(ctx context.Context) (engine, *modelRelay, error)
 			}
 			p.engineMu.Unlock()
 		}
-		return engine{}, nil, attempt.err
+		return engine{}, attempt.err
 	}
 	select {
 	case <-attempt.engine.done:
-		return engine{}, nil, errEngineExited
+		return engine{}, errEngineExited
 	default:
-		return attempt.engine, attempt.relay, nil
+		return attempt.engine, nil
 	}
 }
 
@@ -173,22 +173,27 @@ func (p *plugin) runEngineAttempt(attempt *engineAttempt) {
 		attempt.err = err
 		return
 	}
-	relay, err := newModelRelay()
-	if err != nil {
-		attempt.err = &engineStartupError{stage: "relay", cause: err}
-		return
-	}
 	started, err := p.startEngine(ctx, p.ctx)
 	if err == nil {
 		err = ctx.Err()
 	}
 	if err != nil {
 		started.close()
-		relay.stop()
 		attempt.err = err
 		return
 	}
-	attempt.engine, attempt.relay = started, relay
+	attempt.engine = started
+}
+
+func (p *plugin) kernelCall(ctx context.Context, op string, fields map[string]any, into any) error {
+	e, err := p.runningEngine(ctx)
+	if err != nil {
+		return err
+	}
+	if e.worker == nil {
+		return errEngineExited
+	}
+	return e.worker.call(ctx, op, fields, into)
 }
 
 func (p *plugin) shutdown() {
@@ -203,9 +208,6 @@ func (p *plugin) shutdown() {
 		if attempt != nil {
 			<-attempt.done
 			attempt.engine.close()
-			if attempt.relay != nil {
-				attempt.relay.stop()
-			}
 		}
 	})
 }

@@ -7,75 +7,1599 @@
 	<meta name="color-scheme" content="light dark">
 	<title>Billion Context</title>
 	<style>
+		*,
+		*::before,
+		*::after {
+			box-sizing: border-box;
+		}
+
+		:root {
+			color-scheme: light dark;
+			--plane: #f5f7f8;
+			--plane-2: #e9edef;
+			--plane-3: #dfe4e7;
+			--ink: #14181b;
+			--ink-2: #49525a;
+			--ink-3: #667079;
+			--rule: #d7dde1;
+			--rule-strong: #b4bec6;
+			--accent: #1d5f8a;
+			--accent-2: #174c6e;
+			--accent-soft: #d3e5ef;
+			--on-accent: #ffffff;
+			--ok: #1c6a4c;
+			--bad: #a2272b;
+			--ring: #1d5f8a;
+			--shadow: 0 10px 28px rgba(16, 24, 30, .16);
+			--sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+			--mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+		}
+
+		@media (prefers-color-scheme: dark) {
+			:root {
+				--plane: #13171a;
+				--plane-2: #1b2125;
+				--plane-3: #232b30;
+				--ink: #e7ecef;
+				--ink-2: #b0bac2;
+				--ink-3: #8b959e;
+				--rule: #2a3339;
+				--rule-strong: #3b474f;
+				--accent: #3d8fbf;
+				--accent-2: #57a3cf;
+				--accent-soft: #17303d;
+				--ok: #6cc59c;
+				--bad: #e8908c;
+				--ring: #9ccbe8;
+				--shadow: 0 10px 28px rgba(0, 0, 0, .5);
+			}
+		}
+
+		html {
+			-webkit-text-size-adjust: 100%;
+			scrollbar-color: var(--rule-strong) var(--plane);
+		}
+
 		body {
-			font: 1rem/1.5 system-ui, sans-serif;
 			margin: 0;
+			background: var(--plane);
+			color: var(--ink);
+			font: 400 .9375rem/1.55 var(--sans);
+			font-variant-numeric: tabular-nums;
+			-webkit-font-smoothing: antialiased;
+		}
+
+		::selection {
+			background: var(--accent-soft);
+			color: var(--ink);
+		}
+
+		:focus-visible {
+			outline: 2px solid var(--ring);
+			outline-offset: 2px;
+		}
+
+		input {
+			caret-color: var(--accent);
+		}
+
+		[hidden] {
+			display: none !important;
+		}
+
+		.app {
+			max-width: 78rem;
+			margin: 0 auto;
+			padding: 1.5rem clamp(1rem, 3vw, 2.5rem) 3.5rem;
+		}
+
+		/* On a wide screen CPA's floating panel sits in the top-right corner, up to
+		   300px wide. Reserve a right-hand lane for it instead of 125px of empty
+		   height on every row; on narrow screens the panel spans the top instead. */
+		@media (min-width: 60rem) {
+			.app {
+				max-width: 100rem;
+				padding-inline-end: 21rem;
+			}
+		}
+
+		@media (max-width: 59.999rem) {
+			.app {
+				padding-top: 8.6rem;
+			}
+		}
+
+		.fallback {
+			max-width: 34rem;
+			margin: 0 auto;
+			padding: 9rem 1rem;
+			color: var(--ink-2);
+		}
+
+		.sr-only {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			margin: -1px;
+			padding: 0;
+			overflow: hidden;
+			clip-path: inset(50%);
+			white-space: nowrap;
+		}
+
+		.masthead {
+			display: flex;
+			flex-direction: column;
+			align-items: flex-start;
+			gap: .75rem;
+			padding-bottom: .7rem;
+			border-bottom: 2px solid var(--ink);
+		}
+
+		.brand {
+			min-width: 0;
+		}
+
+		.brand h1 {
+			margin: 0;
+			font-size: 1.5rem;
+			font-weight: 640;
+			letter-spacing: -.022em;
+			line-height: 1.2;
+		}
+
+		.tagline {
+			display: block;
+			margin-top: .2rem;
+			color: var(--ink-2);
+			font-size: .875rem;
+		}
+
+		.controls {
+			display: flex;
+			align-items: center;
+			gap: .5rem;
+			flex-wrap: wrap;
+		}
+
+		.lang {
+			display: inline-flex;
+			border: 1px solid var(--rule-strong);
+			border-radius: 2px;
+			overflow: hidden;
+			background: var(--plane);
+		}
+
+		.lang button {
+			min-width: 2.75rem;
+			min-height: 2.25rem;
+			padding: 0 .55rem;
+			border: 0;
+			border-inline-start: 1px solid var(--rule);
+			background: transparent;
+			color: var(--ink-2);
+			font: 550 .8125rem/1 var(--sans);
+			letter-spacing: .04em;
+			cursor: pointer;
+			transition: background-color .15s ease, color .15s ease;
+		}
+
+		.lang button:first-child {
+			border-inline-start: 0;
+		}
+
+		.lang button:hover {
+			background: var(--plane-2);
+			color: var(--ink);
+		}
+
+		.lang button[aria-pressed="true"] {
+			background: var(--accent);
+			color: var(--on-accent);
+		}
+
+		.btn {
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			min-height: 2.25rem;
+			padding: .45rem .85rem;
+			border: 1px solid var(--rule-strong);
+			border-radius: 2px;
+			background: var(--plane);
+			color: var(--ink);
+			font: 550 .875rem/1.3 var(--sans);
+			text-decoration: none;
+			cursor: pointer;
+			transition: background-color .15s ease, border-color .15s ease, color .15s ease;
+		}
+
+		.btn:hover {
+			background: var(--plane-2);
+			border-color: var(--ink-3);
+		}
+
+		.btn:active {
+			background: var(--plane-3);
+		}
+
+		.btn[disabled],
+		.btn[aria-disabled="true"] {
+			opacity: .5;
+			cursor: not-allowed;
+			pointer-events: none;
+		}
+
+		.btn.primary {
+			background: var(--accent);
+			border-color: var(--accent);
+			color: var(--on-accent);
+		}
+
+		.btn.primary:hover {
+			background: var(--accent-2);
+			border-color: var(--accent-2);
+		}
+
+		.btn.small {
+			min-height: 2rem;
+			padding: .25rem .6rem;
+			font-size: .8125rem;
+		}
+
+		.tipwrap {
+			position: relative;
+			display: inline-flex;
+		}
+
+		.tip {
+			position: absolute;
+			top: calc(100% + .5rem);
+			right: 0;
+			z-index: 5;
+			width: max-content;
+			max-width: min(23rem, calc(100vw - 2rem));
+			padding: .6rem .7rem;
+			border: 1px solid var(--rule-strong);
+			background: var(--plane);
+			color: var(--ink);
+			box-shadow: var(--shadow);
+			font-size: .8125rem;
+			line-height: 1.45;
+			opacity: 0;
+			visibility: hidden;
+			transform: translateY(-2px);
+			transition: opacity .15s ease, transform .15s ease, visibility .15s;
+		}
+
+		.tipwrap:hover .tip,
+		.tipwrap:focus-within .tip {
+			opacity: 1;
+			visibility: visible;
+			transform: none;
+		}
+
+		.notice {
+			display: flex;
+			align-items: flex-start;
+			gap: .75rem 1.25rem;
+			flex-wrap: wrap;
+			margin-top: 1.25rem;
+			padding: .7rem .85rem;
+			border: 1px solid var(--rule-strong);
+			background: var(--plane-2);
+		}
+
+		.notice p {
+			flex: 1 1 20rem;
+			margin: 0;
+			color: var(--ink-2);
+			font-size: .875rem;
 		}
 
 		main {
-			max-width: 32rem;
-			margin: 3rem auto;
-			padding: 0 1rem;
+			padding-top: 1.5rem;
 		}
 
-		label,
-		input {
-			display: block;
+		.totals {
+			margin: 0;
+			border-top: 1px solid var(--ink);
 		}
 
-		input,
-		button {
-			font: inherit;
-			padding: .4rem .6rem;
+		.totals div {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr) auto;
+			align-items: baseline;
+			gap: .35rem 1.5rem;
+			padding: .6rem 0;
+			border-bottom: 1px solid var(--rule);
 		}
 
-		input {
-			box-sizing: border-box;
+		.totals dt {
+			color: var(--ink-2);
+		}
+
+		.totals dd {
+			margin: 0;
+			font-size: 1.0625rem;
+			font-weight: 600;
+			white-space: nowrap;
+		}
+
+		.totals div.lead dt {
+			color: var(--ink);
+			font-weight: 560;
+		}
+
+		.totals div.lead dd {
+			font-size: 1.875rem;
+			font-weight: 620;
+			letter-spacing: -.025em;
+			line-height: 1.15;
+		}
+
+		.totals-note {
+			max-width: 68ch;
+			margin: .65rem 0 0;
+			color: var(--ink-2);
+			font-size: .8125rem;
+		}
+
+		.section {
+			margin-top: 2.25rem;
+		}
+
+		.section-head {
+			display: flex;
+			align-items: baseline;
+			justify-content: space-between;
+			gap: .5rem 1.5rem;
+			flex-wrap: wrap;
+			margin-bottom: .35rem;
+		}
+
+		.section h2 {
+			margin: 0;
+			font-size: 1.125rem;
+			font-weight: 620;
+			letter-spacing: -.012em;
+			outline: none;
+		}
+
+		.section h2:focus-visible {
+			outline: 2px solid var(--ring);
+			outline-offset: 4px;
+		}
+
+		.link {
+			color: var(--accent);
+			text-decoration: underline;
+			text-decoration-thickness: 1px;
+			text-underline-offset: .18em;
+		}
+
+		.link:hover {
+			text-decoration-thickness: 2px;
+		}
+
+		.table {
 			width: 100%;
-			margin: .25rem 0 .75rem;
+			border-collapse: collapse;
+			font-size: .9375rem;
+		}
+
+		.table th {
+			padding: .45rem .9rem .45rem 0;
+			border-bottom: 1px solid var(--rule-strong);
+			color: var(--ink-3);
+			font-size: .75rem;
+			font-weight: 600;
+			letter-spacing: .05em;
+			text-align: left;
+			text-transform: uppercase;
+			white-space: nowrap;
+		}
+
+		.table td {
+			padding: .7rem .9rem .7rem 0;
+			border-bottom: 1px solid var(--rule);
+			vertical-align: baseline;
+		}
+
+		.table tr:last-child td {
+			border-bottom: 0;
+		}
+
+		.table .num {
+			padding-right: 0;
+			text-align: right;
+			white-space: nowrap;
+		}
+
+		.cell-title {
+			width: 100%;
+			min-width: 0;
+		}
+
+		.rowlink {
+			color: var(--ink);
+			font-weight: 560;
+			text-decoration: none;
+			overflow-wrap: anywhere;
+		}
+
+		.rowlink:hover,
+		.rowlink:focus-visible {
+			text-decoration: underline;
+			text-decoration-thickness: 1px;
+			text-underline-offset: .18em;
+			text-decoration-color: var(--accent);
+		}
+
+		.rowmeta {
+			display: none;
+			margin-top: .15rem;
+			color: var(--ink-2);
+			font-size: .8125rem;
+		}
+
+		.badge {
+			display: inline-block;
+			margin-inline-start: .5rem;
+			padding: .05rem .35rem;
+			border: 1px solid var(--rule-strong);
+			border-radius: 2px;
+			color: var(--ink-2);
+			font-size: .75rem;
+			font-weight: 550;
+			vertical-align: .05em;
+		}
+
+		.muted {
+			color: var(--ink-2);
+			font-size: .875rem;
+		}
+
+		.empty {
+			max-width: 64ch;
+			margin: .9rem 0 0;
+			color: var(--ink-2);
+		}
+
+		.search {
+			display: flex;
+			gap: .5rem;
+			flex-wrap: wrap;
+			margin: .5rem 0 1rem;
+		}
+
+		.search input {
+			flex: 1 1 16rem;
+			min-width: 0;
+			min-height: 2.25rem;
+			padding: .4rem .6rem;
+			border: 1px solid var(--rule-strong);
+			border-radius: 2px;
+			background: var(--plane);
+			color: var(--ink);
+			font: inherit;
+		}
+
+		.search input::placeholder {
+			color: var(--ink-3);
+		}
+
+		.pager {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 1rem;
+			flex-wrap: wrap;
+			margin-top: 1rem;
+			color: var(--ink-2);
+			font-size: .875rem;
+		}
+
+		.pager .pairs {
+			display: flex;
+			gap: .5rem;
+		}
+
+		.meta {
+			display: flex;
+			gap: .35rem 1.5rem;
+			flex-wrap: wrap;
+			margin: .4rem 0 0;
+			color: var(--ink-2);
+			font-size: .875rem;
+		}
+
+		.meta div {
+			display: flex;
+			gap: .4rem;
+		}
+
+		.meta dt {
+			color: var(--ink-3);
+		}
+
+		.meta dd {
+			margin: 0;
+		}
+
+		code {
+			overflow-wrap: anywhere;
+			color: var(--ink-2);
+			font: .8125rem/1.5 var(--mono);
+		}
+
+		.backlink {
+			display: inline-block;
+			margin-bottom: .5rem;
+			font-size: .875rem;
+		}
+
+		.legacy-note {
+			max-width: 68ch;
+			margin: .6rem 0 0;
+			color: var(--ink-2);
+			font-size: .875rem;
+		}
+
+		.detail-facts {
+			margin: 1rem 0 0;
+			border-top: 1px solid var(--ink);
+		}
+
+		.detail-facts div {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr) auto;
+			align-items: baseline;
+			gap: .35rem 1.5rem;
+			padding: .6rem 0;
+			border-bottom: 1px solid var(--rule);
+		}
+
+		.detail-facts dt {
+			color: var(--ink-2);
+		}
+
+		.detail-facts dd {
+			margin: 0;
+			font-size: 1.0625rem;
+			font-weight: 600;
+			text-align: right;
+			overflow-wrap: anywhere;
+		}
+
+		.detail-facts div.lead dd {
+			font-size: 1.875rem;
+			font-weight: 620;
+			letter-spacing: -.025em;
+		}
+
+		.blocks td:first-child {
+			color: var(--ink-3);
+			font-size: .8125rem;
+			white-space: nowrap;
+		}
+
+		.blocks td.summary {
+			max-width: 72ch;
+			overflow-wrap: anywhere;
+			white-space: pre-wrap;
+		}
+
+		.events {
+			margin: 0;
+			padding: 0;
+			list-style: none;
+		}
+
+		.events li {
+			padding: .6rem 0;
+			border-bottom: 1px solid var(--rule);
+		}
+
+		.events li:last-child {
+			border-bottom: 0;
+		}
+
+		.event-head {
+			display: flex;
+			align-items: baseline;
+			justify-content: space-between;
+			gap: .5rem 1rem;
+		}
+
+		.event-kind {
+			font-weight: 560;
+		}
+
+		.event-time {
+			color: var(--ink-3);
+			font-size: .8125rem;
+			white-space: nowrap;
+		}
+
+		.diag {
+			margin-top: .3rem;
+		}
+
+		.diag summary {
+			color: var(--accent);
+			font-size: .8125rem;
+			cursor: pointer;
+		}
+
+		.diag pre {
+			margin: .4rem 0 0;
+			padding: .55rem .7rem;
+			border: 1px solid var(--rule);
+			background: var(--plane-2);
+			color: var(--ink);
+			font: .8125rem/1.5 var(--mono);
+			white-space: pre-wrap;
+			overflow-wrap: anywhere;
+		}
+
+		.settings {
+			margin-top: 2.5rem;
+			padding-top: 1.1rem;
+			border-top: 1px solid var(--rule-strong);
+		}
+
+		.setting-row {
+			display: flex;
+			align-items: flex-start;
+			justify-content: space-between;
+			gap: 1rem 2rem;
+			flex-wrap: wrap;
+		}
+
+		.setting-copy {
+			flex: 1 1 24rem;
+			max-width: 68ch;
+		}
+
+		.setting-copy p {
+			margin: 0;
+		}
+
+		.setting-copy .help {
+			margin-top: .2rem;
+			color: var(--ink-2);
+			font-size: .875rem;
+		}
+
+		.switch {
+			display: inline-flex;
+			align-items: center;
+			gap: .55rem;
+			min-height: 2.25rem;
+			cursor: pointer;
+			font-size: .875rem;
+			font-weight: 550;
+		}
+
+		.switch input {
+			width: 1.1rem;
+			height: 1.1rem;
+			margin: 0;
+			accent-color: var(--accent);
+		}
+
+		.status {
+			margin: .5rem 0 0;
+			min-height: 1.35rem;
+			color: var(--ink-2);
+			font-size: .875rem;
+		}
+
+		.status[data-tone="ok"] {
+			color: var(--ok);
+		}
+
+		.status[data-tone="bad"] {
+			color: var(--bad);
+		}
+
+		.login {
+			max-width: 34rem;
+		}
+
+		.login h2 {
+			margin: 0 0 .4rem;
+			font-size: 1.25rem;
+			font-weight: 620;
+			letter-spacing: -.015em;
+			outline: none;
+		}
+
+		.login .lead {
+			margin: 0 0 1.35rem;
+			color: var(--ink-2);
+		}
+
+		.field {
+			display: block;
+			margin-bottom: .55rem;
+			color: var(--ink-2);
+			font-size: .8125rem;
+			font-weight: 550;
+		}
+
+		.field input {
+			display: block;
+			width: 100%;
+			min-height: 2.5rem;
+			margin-top: .3rem;
+			padding: .45rem .6rem;
+			border: 1px solid var(--rule-strong);
+			border-radius: 2px;
+			background: var(--plane);
+			color: var(--ink);
+			font: inherit;
+			font-weight: 400;
+		}
+
+		.field input[aria-invalid="true"] {
+			border-color: var(--bad);
+		}
+
+		.login .btn {
+			min-height: 2.5rem;
+		}
+
+		.skeleton {
+			margin-top: 1.25rem;
+		}
+
+		.skeleton div {
+			height: 1.9rem;
+			margin-bottom: .55rem;
+			background: var(--plane-2);
+		}
+
+		.skeleton div:nth-child(2) {
+			width: 82%;
+		}
+
+		.skeleton div:nth-child(3) {
+			width: 64%;
+		}
+
+		.skeleton div:nth-child(4) {
+			width: 74%;
+		}
+
+		.colophon {
+			margin-top: 3.5rem;
+			padding-top: .8rem;
+			border-top: 1px solid var(--rule);
+			color: var(--ink-3);
+			font-size: .8125rem;
+		}
+
+		.colophon p {
+			margin: 0 0 .3rem;
+		}
+
+		@media (max-width: 45rem) {
+
+			.col-model,
+			.col-proto {
+				display: none;
+			}
+
+			.rowmeta {
+				display: block;
+			}
+
+			.btn,
+			.search input,
+			.switch,
+			.lang button {
+				min-height: 2.75rem;
+			}
+		}
+
+		@media (max-width: 34rem) {
+			.col-updated {
+				display: none;
+			}
+
+			.event-head {
+				flex-wrap: wrap;
+			}
+		}
+
+		@media (prefers-reduced-motion: reduce) {
+			* {
+				transition: none !important;
+			}
+		}
+	</style>
+	<style id="provider-cache-style">
+		.provider-cache {
+			padding: 1rem 0;
+			border-block: 1px solid var(--rule);
+		}
+
+		.cache-head {
+			display: flex;
+			align-items: baseline;
+			flex-wrap: wrap;
+			gap: .65rem 1rem;
+		}
+
+		.cache-head h2 {
+			font-size: 1.05rem;
+			margin: 0;
+		}
+
+		.cache-head strong {
+			font-size: 1.45rem;
+			font-weight: 650;
+			color: var(--accent);
+			font-variant-numeric: tabular-nums;
+		}
+
+		.cache-readings {
+			display: flex;
+			flex-wrap: wrap;
+			gap: .6rem 2rem;
+			margin: .65rem 0;
+		}
+
+		.cache-readings dt {
+			font-size: .8rem;
+			color: var(--ink-2);
+		}
+
+		.cache-readings dd {
+			margin: 0;
+			font-weight: 600;
+			font-variant-numeric: tabular-nums;
+		}
+
+		.cache-comparison summary {
+			cursor: pointer;
+			width: fit-content;
+			color: var(--ink);
+			font-size: .85rem;
+			padding: .35rem 0;
+		}
+
+		.cache-comparison p {
+			max-width: 65ch;
+			margin: 0;
+		}
+
+		:root {
+			--plane: #f3f6f3;
+			--plane-2: #e7eeea;
+			--ink: #203a36;
+			--ink-2: #445e58;
+			--ink-3: #526962;
+			--accent: #17665e;
+			--accent-2: #104c46;
+			--rule: #cbd7d0;
+			--rule-strong: #91a79c;
+			--ring: #19766a;
+			--shell: #18574f
+		}
+
+		@media(prefers-color-scheme:dark) {
+			:root {
+				--plane: #141e1c;
+				--plane-2: #1d2c27;
+				--ink: #e4eee9;
+				--ink-2: #b4c6bd;
+				--ink-3: #a2b6ab;
+				--accent: #7dc8af;
+				--accent-2: #a7dfcb;
+				--rule: #354a40;
+				--rule-strong: #647c6e;
+				--ring: #a5ddc4;
+				--shell: #194c44;
+				--on-accent: #10231b
+			}
+		}
+
+		.app {
+			max-width: 100rem;
+			padding: 0 clamp(1rem, 3.4vw, 3.5rem) 3rem;
+		}
+
+		.masthead {
+			margin: 0 calc(-1 * clamp(1rem, 3.4vw, 3.5rem));
+			padding: 1.1rem max(20rem, 22%) 1.1rem clamp(1rem, 3.4vw, 3.5rem);
+			background: var(--shell);
+			border: 0;
+			color: #fff;
+			flex-direction: row;
+			align-items: center;
+			gap: 1.2rem 2.25rem;
+			flex-wrap: wrap;
+		}
+
+		.masthead .tagline {
+			color: #d2e4dc
+		}
+
+		.masthead .tip {
+			color: var(--ink)
+		}
+
+		main {
+			padding-top: 0
+		}
+
+		.journal-nav {
+			display: flex;
+			gap: 1.5rem;
+			align-items: baseline;
+			border-bottom: 1px solid var(--rule-strong);
+			padding-right: 19rem
+		}
+
+		.journal-nav a {
+			padding: .65rem 0;
+			color: var(--ink-2);
+			font-weight: 550;
+			text-decoration: none;
+			border-bottom: 2px solid transparent
+		}
+
+		.journal-nav a[aria-current=page] {
+			color: var(--accent);
+			border-color: var(--accent)
+		}
+
+		.journal-title {
+			font-size: clamp(1.75rem, 3.2vw, 2.8rem);
+			letter-spacing: -.035em;
+			line-height: 1.12;
+			margin: 1.55rem 0 1rem
+		}
+
+		.journal-metrics {
+			display: grid;
+			grid-template-columns: 1fr 1.25fr;
+			gap: 2.5rem;
+			border-top: 2px solid var(--accent);
+			border-bottom: 1px solid var(--rule-strong);
+			padding: 1.1rem 0
+		}
+
+		.journal-savings h3 {
+			margin: 0;
+			font-size: 1rem;
+			font-weight: 550
+		}
+
+		.saved-value {
+			font-variant-numeric: tabular-nums;
+			font-size: clamp(2.8rem, 5vw, 4.3rem);
+			letter-spacing: -.035em;
+			line-height: 1.15
+		}
+
+		.journal-savings p,
+		.fold-receipt p {
+			margin: .25rem 0
+		}
+
+		.journal-metrics .provider-cache {
+			padding: 0;
+			border: 0
+		}
+
+		.journal-body {
+			display: grid;
+			grid-template-columns: minmax(0, 2.25fr) minmax(18rem, 1fr);
+			gap: 2.3rem;
+			margin-top: 1.4rem
+		}
+
+		.journal-body h2 {
+			font-size: 1.12rem;
+			margin: 0 0 .55rem
+		}
+
+		.fold-receipt {
+			padding-left: 1.4rem;
+			border-inline-start: 1px solid var(--rule-strong)
+		}
+
+		.latest-state {
+			color: var(--ok);
+			font-weight: 600
+		}
+
+		.latest-value {
+			font-size: 2.3rem;
+			letter-spacing: -.025em
+		}
+
+		.latest-events {
+			list-style: none;
+			padding: 0;
+			margin: 1rem 0
+		}
+
+		.latest-events li {
+			display: grid;
+			gap: .3rem .85rem;
+			grid-template-columns: minmax(5rem, 1fr) 1.1fr;
+			border-top: 1px solid var(--rule);
+			padding: .4rem 0
+		}
+
+		.latest-events time {
+			color: var(--ink-2);
+			font-size: .8rem
+		}
+
+		.journal .table .col-proto,
+		.journal .table .col-updated {
+			display: none
+		}
+
+		.journal .table .num {
+			padding-inline: .55rem
+		}
+
+		.table .col-model {
+			white-space: nowrap
+		}
+
+		.detail-facts {
+			margin-bottom: 1rem
+		}
+
+		.journal-list {
+			min-width: 0
+		}
+
+		.journal .table tr:last-child td {
+			border-bottom: 1px solid var(--rule)
+		}
+
+		@media(max-width:59.999rem) {
+			.masthead {
+				padding: 1rem;
+				min-height: 8.4rem;
+				flex-direction: column;
+				align-items: flex-start;
+				gap: .45rem
+			}
+
+			.masthead .controls {
+				margin-top: 4.6rem
+			}
+
+			.brand .tagline {
+				max-width: 40%
+			}
+
+			.journal-nav {
+				padding-right: 0
+			}
+
+			.journal-metrics {
+				grid-template-columns: 1fr;
+				gap: .8rem
+			}
+
+			.journal-metrics .provider-cache {
+				border-top: 1px solid var(--rule);
+				padding-top: .65rem
+			}
+
+			.journal-body {
+				grid-template-columns: 1fr;
+				gap: 1.4rem
+			}
+
+			.fold-receipt {
+				padding: .85rem 0 0;
+				border-inline-start: 0;
+				border-block-start: 1px solid var(--rule)
+			}
+
+			.journal .table .num {
+				padding-inline: .35rem
+			}
+
+			.journal-title {
+				margin: .9rem 0 .6rem
+			}
+
+			.journal-nav a {
+				padding: .6rem 0
+			}
+
+			.journal .col-model {
+				display: none
+			}
+
+			.saved-value {
+				font-size: 2.7rem
+			}
+
+			.brand h1 {
+				max-width: 80vw
+			}
+		}
+
+		.row-outcome {
+			display: block;
+			color: var(--ink-2);
+			font-size: .81rem;
+			line-height: 1.45;
+			margin: .1rem 0
+		}
+
+		.table .num {
+			padding-inline: .6rem
+		}
+
+		.table .col-updated {
+			white-space: nowrap
+		}
+
+		.table .cell-title {
+			width: auto;
+			min-width: 9rem
+		}
+
+		.table .col-model {
+			min-width: 6rem
+		}
+
+		.table th.num+th.num,
+		.table td.num+td.num {
+			padding-inline-start: 1.1rem
+		}
+
+		.journal-list .cell-title {
+			width: 54%
+		}
+
+		@media(max-width:45rem) {
+			.table .cell-title {
+				min-width: 0
+			}
+
+			.table .num {
+				padding-inline: .3rem
+			}
+
+			.table th.num+th.num,
+			.table td.num+td.num {
+				padding-inline-start: .7rem
+			}
+
+			.journal-list .cell-title {
+				width: auto
+			}
 		}
 	</style>
 </head>
 
 <body>
-	<main>
-		<h1>Billion Context</h1>
-		<p>Use your CPA management key to open read-only Overview and Sessions. An accepted key stays in this browser
-			until you lock the WebUI or CPA rejects it.</p>
-		<form autocomplete="off">
-			<label for="management-key">CPA management key</label>
-			<input id="management-key" type="password" aria-describedby="status" required>
-			<button type="submit">Open Billion Context</button>
-		</form>
-		<p id="status" role="status"></p>
-		<progress aria-label="Opening the bili WebUI" hidden></progress>
-	</main>
+	<noscript>
+		<p class="fallback">Billion Context needs JavaScript to read compression state from this CPA installation.</p>
+	</noscript>
 	<script>
 		(() => {
-			const form = document.querySelector('form');
-			const input = document.getElementById('management-key');
-			const button = form.querySelector('button');
-			const status = document.getElementById('status');
-			const progress = document.querySelector('progress');
-			const nativeFetch = window.fetch.bind(window);
-			const root = '/__bili/';
+			'use strict';
+
 			const route = '/v0/management/plugins/omp-billion-context/webui-data';
 			const savedKey = 'omp-billion-context.management-key';
-			const dismissPaths = new Map([
-				[root + 'notices/dismiss', 'notices'],
-				[root + 'host-plugins/dismiss', 'hostPluginNotices'],
-			]);
-			const denied = response => response.status === 401 || response.status === 403;
-			const validID = id => typeof id === 'string' && id.length > 0 && id.length <= 256;
-			const dismissLimit = 64;
-			const dismissed = new Map();
-			for (const list of dismissPaths.values()) {
-				let ids = [];
+			const savedLanguage = 'omp-billion-context.language';
+			const savedNotice = 'omp-billion-context.priority-notice';
+			const languages = ['en', 'ru', 'zh'];
+			const localeTags = {en: 'en', ru: 'ru', zh: 'zh-CN'};
+			const pageSize = 25;
+			const safeID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/;
+			const nativeFetch = window.fetch.bind(window);
+
+			const messages = {
+				en: {
+					'app.tagline': 'Compression ledger for this CPA installation',
+					'lang.group': 'Language',
+					'refresh': 'Refresh',
+					'lock.label': 'Lock dashboard',
+					'lock.help': 'Forgets the saved management key in this browser and locks the dashboard in other open tabs. Compression keeps running; no conversation and no server setting changes.',
+					'overview.saved': 'Estimated tokens saved',
+					'overview.savedNote': 'Estimated from saved blocks. Not provider billing and not a cache-hit measurement.',
+					'overview.sessions': 'Conversations',
+					'overview.blocks': 'Compressed blocks',
+					'overview.reported': 'Not reported',
+					'overview.recent': 'Latest conversations',
+					'overview.all': 'All conversations',
+					'overview.empty': 'No conversation has been compressed yet. The first saved block appears here after a fold.',
+					'sessions.heading': 'Conversations',
+					'sessions.search': 'Search title or ID',
+					'sessions.searchButton': 'Search',
+					'sessions.clear': 'Clear search',
+					'sessions.total': '{n} conversations',
+					'sessions.empty': 'No conversation has been compressed yet. The first saved block appears here after a client sends a long conversation.',
+					'sessions.noMatch': 'No conversation matches “{q}”.',
+					'sessions.page': 'Page {page} of {pages}',
+					'sessions.prev': 'Previous',
+					'sessions.next': 'Next',
+					'table.session': 'Conversation',
+					'table.model': 'Model',
+					'table.protocol': 'Protocol',
+					'table.updated': 'Updated',
+					'table.blocks': 'Blocks',
+					'table.saved': 'Saved',
+					'session.legacy': 'Archived',
+					'session.legacyNote': 'Read from data written before this version. It is not evidence that a new conversation inherited the fold.',
+					'session.untitled': 'Untitled conversation',
+					'detail.back': 'All conversations',
+					'detail.blocks': 'Saved blocks',
+					'detail.events': 'Diagnostics',
+					'detail.noBlocks': 'This conversation has no saved blocks.',
+					'detail.noEvents': 'No diagnostics were recorded for this conversation.',
+					'detail.eventDetails': 'Details',
+					'detail.id': 'Session ID',
+					'detail.updated': 'Updated',
+					'detail.model': 'Model',
+					'detail.protocol': 'Protocol',
+					'detail.blocksCount': '{n} saved blocks',
+					'detail.unknown': 'Not reported',
+					'detail.disclosure': 'Expanded diagnostics may repeat conversation text. They are shown only when opened here.',
+					'event.fold': 'Fold saved',
+					'event.compress': 'Compression run',
+					'event.reject': 'Compression rejected',
+					'event.error': 'Error',
+					'event.skip': 'Compression skipped',
+					'event.restore': 'Fold restored',
+					'event.configure': 'Setting changed',
+					'event.other': 'Event',
+					'settings.heading': 'Chat notifications',
+					'settings.label': 'Compression markers',
+					'settings.help': 'Hides compression markers in model conversations for every client of this installation. Folding, storage and this dashboard keep working.',
+					'settings.shown': 'Markers shown',
+					'settings.hidden': 'Markers hidden',
+					'settings.saving': 'Saving on the server…',
+					'settings.saved': 'Saved on the server.',
+					'settings.failed': 'The server did not confirm the change. Try again.',
+					'settings.unreported': 'The server did not report this setting. Reload the dashboard to read it again.',
+					'settings.showNotice': 'Show the priority reminder again',
+					'notice.body': 'Router priority: if you use other model routers, set this plugin’s priority higher than theirs. Equal or unset priorities can let another router handle a request before compression.',
+					'notice.dismiss': 'Dismiss',
+					'notice.hidden': 'The priority reminder is hidden in this browser. This page’s compressed ledger and CPA are unaffected.',
+					'notice.undo': 'Show it again',
+					'login.heading': 'Open the dashboard',
+					'login.lead': 'Enter the CPA management key. A model API key does not open this dashboard.',
+					'login.label': 'CPA management key',
+					'login.submit': 'Open dashboard',
+					'login.busy': 'Checking the key…',
+					'login.required': 'Enter the CPA management key.',
+					'login.rejected': 'CPA rejected that key. Enter the current CPA management key.',
+					'login.unreachable': 'CPA could not open the dashboard (HTTP {status}). Try again.',
+					'login.offline': 'Could not connect to CPA. Check that CPA is running, then try again.',
+					'loading.overview': 'Loading compression activity…',
+					'loading.sessions': 'Loading conversations…',
+					'loading.detail': 'Loading this conversation…',
+					'error.title': 'Could not open the dashboard',
+					'error.rejected': 'CPA no longer accepts this key. Lock the dashboard and enter the current key.',
+					'error.unavailable': 'Compression storage is unavailable. Try again.',
+					'error.notFound': 'That conversation is no longer available.',
+					'error.tooLarge': 'This view is too large to display. Open a smaller conversation.',
+					'error.invalid': 'That conversation link is not valid.',
+					'error.read': 'The dashboard could not read that view. Reload and try again.',
+					'error.status': 'Could not load this view (HTTP {status}). Try again.',
+					'error.offline': 'Could not connect to CPA. Check that CPA is running, then try again.',
+					'retry': 'Try again',
+					'credit.text': 'Compression is provided by the acp-kernel library.',
+					'credit.link': 'acp-kernel on GitHub',
+				},
+				ru: {
+					'app.tagline': 'Журнал сжатия для этой установки CPA',
+					'lang.group': 'Язык',
+					'refresh': 'Обновить',
+					'lock.label': 'Заблокировать панель',
+					'lock.help': 'Забывает сохранённый ключ управления в этом браузере и блокирует панель в других открытых вкладках. Сжатие продолжает работать; разговоры и серверные настройки не меняются.',
+					'overview.saved': 'Оценка сэкономленных токенов',
+					'overview.savedNote': 'Оценка по сохранённым блокам. Это не биллинг провайдера и не измерение попаданий в кэш.',
+					'overview.sessions': 'Разговоры',
+					'overview.blocks': 'Сжатые блоки',
+					'overview.reported': 'Нет данных',
+					'overview.recent': 'Последние разговоры',
+					'overview.all': 'Все разговоры',
+					'overview.empty': 'Пока ни один разговор не сжат. Первый сохранённый блок появится здесь.',
+					'sessions.heading': 'Разговоры',
+					'sessions.search': 'Поиск по названию или ID',
+					'sessions.searchButton': 'Найти',
+					'sessions.clear': 'Сбросить поиск',
+					'sessions.total': 'Разговоров: {n}',
+					'sessions.empty': 'Пока ни один разговор не сжат. Первый блок появится здесь после того, как клиент отправит длинный разговор.',
+					'sessions.noMatch': 'Нет разговоров по запросу «{q}».',
+					'sessions.page': 'Страница {page} из {pages}',
+					'sessions.prev': 'Назад',
+					'sessions.next': 'Вперёд',
+					'table.session': 'Разговор',
+					'table.model': 'Модель',
+					'table.protocol': 'Протокол',
+					'table.updated': 'Обновлён',
+					'table.blocks': 'Блоки',
+					'table.saved': 'Сэкономлено',
+					'session.legacy': 'Архив',
+					'session.legacyNote': 'Прочитано из данных, записанных до этой версии. Это не доказывает, что новый разговор унаследовал сохранённый блок.',
+					'session.untitled': 'Без названия',
+					'detail.back': 'Все разговоры',
+					'detail.blocks': 'Сохранённые блоки',
+					'detail.events': 'Диагностика',
+					'detail.noBlocks': 'У этого разговора нет сохранённых блоков.',
+					'detail.noEvents': 'Для этого разговора диагностика не записана.',
+					'detail.eventDetails': 'Подробнее',
+					'detail.id': 'ID разговора',
+					'detail.updated': 'Обновлён',
+					'detail.model': 'Модель',
+					'detail.protocol': 'Протокол',
+					'detail.blocksCount': 'Сохранённых блоков: {n}',
+					'detail.unknown': 'Нет данных',
+					'detail.disclosure': 'Развёрнутая диагностика может повторять текст разговора. Она показывается только когда вы её раскрыли.',
+					'event.fold': 'Блок сохранён',
+					'event.compress': 'Запуск сжатия',
+					'event.reject': 'Сжатие отклонено',
+					'event.error': 'Ошибка',
+					'event.skip': 'Сжатие пропущено',
+					'event.restore': 'Блок восстановлен',
+					'event.configure': 'Настройка изменена',
+					'event.other': 'Событие',
+					'settings.heading': 'Уведомления в чате',
+					'settings.label': 'Метки сжатия',
+					'settings.help': 'Скрывает метки сжатия в диалогах с моделью для всех клиентов этой установки. Свёртка, хранение и эта панель продолжают работать.',
+					'settings.shown': 'Метки показываются',
+					'settings.hidden': 'Метки скрыты',
+					'settings.saving': 'Сохранение на сервере…',
+					'settings.saved': 'Сохранено на сервере.',
+					'settings.failed': 'Сервер не подтвердил изменение. Повторите попытку.',
+					'settings.unreported': 'Сервер не сообщил эту настройку. Перезагрузите панель, чтобы прочитать её снова.',
+					'settings.showNotice': 'Показать напоминание о приоритете снова',
+					'notice.body': 'Приоритет роутера: если вы используете другие роутеры моделей, задайте приоритет этого плагина выше их. Равные или незаданные приоритеты позволяют другому роутеру обработать запрос до сжатия.',
+					'notice.dismiss': 'Скрыть',
+					'notice.hidden': 'Напоминание о приоритете скрыто в этом браузере. Сжатие на странице и в CPA это не затрагивает.',
+					'notice.undo': 'Показать снова',
+					'login.heading': 'Открыть панель',
+					'login.lead': 'Введите ключ управления CPA. Ключ модели не открывает эту панель.',
+					'login.label': 'Ключ управления CPA',
+					'login.submit': 'Открыть панель',
+					'login.busy': 'Проверяем ключ…',
+					'login.required': 'Введите ключ управления CPA.',
+					'login.rejected': 'CPA отклонил этот ключ. Введите текущий ключ управления CPA.',
+					'login.unreachable': 'CPA не открыл панель (HTTP {status}). Повторите попытку.',
+					'login.offline': 'Не удалось подключиться к CPA. Проверьте, что CPA запущен, и повторите попытку.',
+					'loading.overview': 'Загружаем активность сжатия…',
+					'loading.sessions': 'Загружаем разговоры…',
+					'loading.detail': 'Загружаем этот разговор…',
+					'error.title': 'Не удалось открыть панель',
+					'error.rejected': 'CPA больше не принимает этот ключ. Заблокируйте панель и введите текущий ключ.',
+					'error.unavailable': 'Хранилище сжатия недоступно. Повторите попытку.',
+					'error.notFound': 'Этот разговор больше недоступен.',
+					'error.tooLarge': 'Этот вид слишком велик для отображения. Откройте разговор поменьше.',
+					'error.invalid': 'Ссылка на разговор неверна.',
+					'error.read': 'Панель не смогла прочитать этот вид. Перезагрузите страницу и повторите попытку.',
+					'error.status': 'Не удалось загрузить вид (HTTP {status}). Повторите попытку.',
+					'error.offline': 'Не удалось подключиться к CPA. Проверьте, что CPA запущен, и повторите попытку.',
+					'retry': 'Повторить',
+					'credit.text': 'Сжатие выполняет библиотека acp-kernel.',
+					'credit.link': 'acp-kernel на GitHub',
+				},
+				zh: {
+					'app.tagline': '此 CPA 安装的压缩记录',
+					'lang.group': '语言',
+					'refresh': '刷新',
+					'lock.label': '锁定面板',
+					'lock.help': '在此浏览器中忘记已保存的管理密钥，并锁定其他已打开的面板标签页。压缩继续进行；对话和服务器设置不会改变。',
+					'overview.saved': '预计节省的 token',
+					'overview.savedNote': '根据已保存的块估算，不是服务商计费，也不是缓存命中测量。',
+					'overview.sessions': '对话',
+					'overview.blocks': '已压缩块',
+					'overview.reported': '无数据',
+					'overview.recent': '最近的对话',
+					'overview.all': '全部对话',
+					'overview.empty': '还没有对话被压缩。第一个保存的块会显示在这里。',
+					'sessions.heading': '对话',
+					'sessions.search': '搜索标题或 ID',
+					'sessions.searchButton': '搜索',
+					'sessions.clear': '清除搜索',
+					'sessions.total': '对话数：{n}',
+					'sessions.empty': '还没有对话被压缩。客户端发送较长对话后，第一个保存的块会显示在这里。',
+					'sessions.noMatch': '没有匹配“{q}”的对话。',
+					'sessions.page': '第 {page} 页，共 {pages} 页',
+					'sessions.prev': '上一页',
+					'sessions.next': '下一页',
+					'table.session': '对话',
+					'table.model': '模型',
+					'table.protocol': '协议',
+					'table.updated': '更新时间',
+					'table.blocks': '块',
+					'table.saved': '已节省',
+					'session.legacy': '归档',
+					'session.legacyNote': '来自此版本之前写入的数据。这不能证明新对话继承了该压缩块。',
+					'session.untitled': '未命名对话',
+					'detail.back': '全部对话',
+					'detail.blocks': '已保存的块',
+					'detail.events': '诊断',
+					'detail.noBlocks': '此对话没有已保存的块。',
+					'detail.noEvents': '此对话没有诊断记录。',
+					'detail.eventDetails': '详情',
+					'detail.id': '对话 ID',
+					'detail.updated': '更新时间',
+					'detail.model': '模型',
+					'detail.protocol': '协议',
+					'detail.blocksCount': '已保存的块：{n}',
+					'detail.unknown': '无数据',
+					'detail.disclosure': '展开的诊断可能包含对话文本。只有在这里展开时才会显示。',
+					'event.fold': '已保存压缩块',
+					'event.compress': '压缩已运行',
+					'event.reject': '压缩被拒绝',
+					'event.error': '错误',
+					'event.skip': '跳过压缩',
+					'event.restore': '压缩块已恢复',
+					'event.configure': '设置已更改',
+					'event.other': '事件',
+					'settings.heading': '聊天通知',
+					'settings.label': '压缩标记',
+					'settings.help': '为此安装的所有客户端隐藏模型对话中的压缩标记。压缩、存储和此面板继续工作。',
+					'settings.shown': '显示标记',
+					'settings.hidden': '标记已隐藏',
+					'settings.saving': '正在保存到服务器…',
+					'settings.saved': '已保存到服务器。',
+					'settings.failed': '服务器未确认更改，请重试。',
+					'settings.unreported': '服务器未报告此设置，请重新加载面板。',
+					'settings.showNotice': '再次显示优先级提醒',
+					'notice.body': '路由优先级：如果您使用其他模型路由，请把此插件的优先级设得更高。优先级相同或未设置时，其他路由可能先处理请求而跳过压缩。',
+					'notice.dismiss': '关闭',
+					'notice.hidden': '优先级提醒已在此浏览器中隐藏，不影响本页的压缩记录与 CPA。',
+					'notice.undo': '再次显示',
+					'login.heading': '打开面板',
+					'login.lead': '请输入 CPA 管理密钥。模型 API 密钥无法打开此面板。',
+					'login.label': 'CPA 管理密钥',
+					'login.submit': '打开面板',
+					'login.busy': '正在检查密钥…',
+					'login.required': '请输入 CPA 管理密钥。',
+					'login.rejected': 'CPA 拒绝了这个密钥。请输入当前的 CPA 管理密钥。',
+					'login.unreachable': 'CPA 无法打开面板（HTTP {status}）。请重试。',
+					'login.offline': '无法连接 CPA。请确认 CPA 正在运行后重试。',
+					'loading.overview': '正在加载压缩活动…',
+					'loading.sessions': '正在加载对话…',
+					'loading.detail': '正在加载此对话…',
+					'error.title': '无法打开面板',
+					'error.rejected': 'CPA 不再接受此密钥。请锁定面板并输入当前密钥。',
+					'error.unavailable': '压缩存储不可用，请重试。',
+					'error.notFound': '该对话已不可用。',
+					'error.tooLarge': '此视图过大，无法显示。请打开更小的对话。',
+					'error.invalid': '该对话链接无效。',
+					'error.read': '面板无法读取此视图。请重新加载后重试。',
+					'error.status': '无法加载此视图（HTTP {status}）。请重试。',
+					'error.offline': '无法连接 CPA。请确认 CPA 正在运行后重试。',
+					'retry': '重试',
+					'credit.text': '压缩由 acp-kernel 库提供。',
+					'credit.link': 'GitHub 上的 acp-kernel',
+				},
+			};
+
+			let language = detectLanguage();
+			let key = '';
+			let openGeneration = 0;
+			let viewToken = 0;
+			let markerToken = 0;
+			let markers = null;
+			let markersSaving = false;
+			let lastSessionsHash = '#/sessions';
+			let viewState = {phase: 'login', message: ''};
+			let noticeDismissed = storeGet(savedNotice) === 'dismissed';
+
+			const mount = h('div', {class: 'app'});
+			document.body.append(mount);
+
+			function t(name, vars) {
+				let value = (messages[language] ?? messages.en)[name];
+				if (value === undefined) value = messages.en[name] ?? name;
+				if (!vars) return value;
+				for (const field of Object.keys(vars)) value = value.split('{' + field + '}').join(String(vars[field]));
+				return value;
+			}
+
+			function h(tag, props, ...children) {
+				const node = document.createElement(tag);
+				for (const name of Object.keys(props ?? {})) {
+					const value = props[name];
+					if (value === undefined || value === null || value === false) continue;
+					if (name === 'text') node.textContent = String(value);
+					else if (name === 'class') node.className = String(value);
+					else if (name === 'dataset') Object.assign(node.dataset, value);
+					else if (name === 'value') node.value = String(value);
+					else if (name === 'checked') node.checked = Boolean(value);
+					else if (name === 'disabled') node.disabled = Boolean(value);
+					else if (name === 'hidden') node.hidden = Boolean(value);
+					else if (name === 'type') node.type = String(value);
+					else if (name === 'id') node.id = String(value);
+					else if (name.startsWith('on') && typeof value === 'function') node.addEventListener(name.slice(2), value);
+					else node.setAttribute(name, value === true ? '' : String(value));
+				}
+				for (const child of children.flat(Infinity)) {
+					if (child === undefined || child === null || child === false) continue;
+					node.append(child);
+				}
+				return node;
+			}
+
+			function byID(node, id) {
+				if (!node) return null;
+				if (node.id === id) return node;
+				for (const child of node.childNodes ?? []) {
+					const found = byID(child, id);
+					if (found) return found;
+				}
+				return null;
+			}
+
+			function storeGet(name) {
+				try {return localStorage.getItem(name);} catch {return null;}
+			}
+
+			function detectLanguage() {
+				const saved = storeGet(savedLanguage);
+				if (languages.includes(saved)) return saved;
+				const tag = String(navigator.language ?? 'en').toLowerCase();
+				if (tag.startsWith('ru')) return 'ru';
+				if (tag.startsWith('zh')) return 'zh';
+				return 'en';
+			}
+
+			function locale() {
+				return localeTags[language] ?? 'en';
+			}
+
+			function formatNumber(value) {
+				return new Intl.NumberFormat(locale()).format(value);
+			}
+
+			function finite(value) {
+				return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+			}
+
+			function formatMetric(value, fallback) {
+				const number = finite(value);
+				if (number === null) return fallback ?? t('overview.reported');
+				return formatNumber(Math.round(number));
+			}
+
+			function formatDate(value) {
+				if (typeof value !== 'string' || !value) return '';
+				const date = new Date(value);
+				if (Number.isNaN(date.getTime())) return '';
 				try {
-					const saved = JSON.parse(localStorage.getItem('omp-billion-context.' + list));
-					if (Array.isArray(saved)) ids = saved.slice(-dismissLimit).filter(validID);
-				} catch { }
-				dismissed.set(list, new Set(ids));
+					return new Intl.DateTimeFormat(locale(), {dateStyle: 'medium', timeStyle: 'short'}).format(date);
+				} catch {
+					return '';
+				}
+			}
+
+			function text(value) {
+				return typeof value === 'string' ? value : '';
+			}
+
+			function eventLabel(kind) {
+				const name = text(kind).trim();
+				const known = {
+					compressed: 'event.fold', fold: 'event.fold', compress: 'event.compress', reject: 'event.reject', rejected: 'event.reject',
+					error: 'event.error', skip: 'event.skip', skipped: 'event.skip', restore: 'event.restore',
+					restored: 'event.restore', configure: 'event.configure',
+				}[name.toLowerCase()];
+				if (known) return t(known);
+				return name ? name.slice(0, 48) : t('event.other');
 			}
 
 			function clearSavedKey() {
@@ -83,162 +1607,528 @@
 				try {sessionStorage.removeItem(savedKey);} catch { }
 			}
 
-			function read(target, key, signal) {
-				return nativeFetch(route + '?' + new URLSearchParams({target}), {
-					headers: {'X-Management-Key': key}, credentials: 'omit', cache: 'no-store', redirect: 'error', signal,
+			function read(target, init = {}) {
+				const headers = {};
+				const credential = init.candidate ?? key;
+				if (credential) headers['X-Management-Key'] = credential;
+				if (init.body !== undefined) headers['content-type'] = 'application/json';
+				return nativeFetch(route + '?' + new URLSearchParams({target: target}).toString(), {
+					method: init.method ?? 'GET',
+					headers,
+					body: init.body === undefined ? undefined : JSON.stringify(init.body),
+					credentials: 'omit',
+					cache: 'no-store',
+					redirect: 'error',
+					signal: init.signal,
 				});
 			}
 
-			function jsonResponse(status, data) {
-				return new Response(JSON.stringify(data), {
-					status, headers: {'Content-Type': 'application/json', 'Cache-Control': 'no-store'},
+			function failureMessage(status) {
+				if (status === 401 || status === 403) return t('error.rejected');
+				if (status === 503) return t('error.unavailable');
+				if (status === 404) return t('error.notFound');
+				if (status === 413) return t('error.tooLarge');
+				if (status === 400) return t('error.read');
+				return t('error.status', {status: String(status)});
+			}
+
+			function parseView(hash) {
+				const raw = text(hash);
+				if (raw.startsWith('#/sessions/')) {
+					let id = raw.slice('#/sessions/'.length);
+					try {id = decodeURIComponent(id);} catch {return null;}
+					return {kind: 'detail', id};
+				}
+				if (raw === '#/sessions' || raw.startsWith('#/sessions?')) {
+					const params = new URLSearchParams(raw.slice('#/sessions'.length).replace(/^\?/, ''));
+					const page = Math.max(1, Number.parseInt(params.get('page') ?? '1', 10) || 1);
+					return {kind: 'sessions', page, q: text(params.get('q')).slice(0, 200)};
+				}
+				if (raw === '#/settings') return {kind: 'settings'};
+				if (raw === '#/overview' || raw === '') return {kind: 'overview'};
+				return null;
+			}
+
+			function targetFor(view) {
+				if (view.kind === 'settings') return '/__bili/settings';
+				if (view.kind === 'overview') return '/__bili/overview';
+				if (view.kind === 'detail') return '/__bili/sessions/' + view.id + '/detail';
+				const params = new URLSearchParams({page: String(view.page), pageSize: String(pageSize)});
+				if (view.q) params.set('q', view.q);
+				return '/__bili/sessions?' + params.toString();
+			}
+
+			function sessionsHash(view) {
+				const params = new URLSearchParams();
+				if (view.page > 1) params.set('page', String(view.page));
+				if (view.q) params.set('q', view.q);
+				const query = params.toString();
+				return '#/sessions' + (query ? '?' + query : '');
+			}
+
+			function go(hash) {
+				if (location.hash === hash) load(hash);
+				else location.hash = hash;
+			}
+
+			function focusView() {
+				const heading = byID(mount, 'view-heading');
+				if (heading && typeof heading.focus === 'function') heading.focus();
+			}
+
+			function lockOut(message) {
+				key = '';
+				openGeneration++;
+				viewToken++;
+				clearSavedKey();
+				viewState = {phase: 'login', message};
+				render();
+			}
+
+			function render() {
+				const active = document.activeElement;
+				const focusID = active && active.id ? active.id : '';
+				document.documentElement.setAttribute('lang', language);
+				mount.replaceChildren(masthead(), mainView(), colophon());
+				if (focusID) {
+					const next = byID(mount, focusID);
+					if (next && typeof next.focus === 'function') next.focus();
+				}
+			}
+
+			function masthead() {
+				const languageButtons = languages.map(id => h('button', {
+					type: 'button', id: 'lang-' + id, 'aria-pressed': String(id === language),
+					onclick: () => setLanguage(id), text: id.toUpperCase(),
+				}));
+				const lockButton = h('button', {
+					type: 'button', id: 'lock', class: 'btn small', 'aria-describedby': 'lock-help', title: t('lock.help'), text: t('lock.label'),
+					onclick: lockDashboard,
 				});
+				const controls = h('div', {class: 'controls'},
+					h('div', {class: 'lang', role: 'group', 'aria-label': t('lang.group')}, languageButtons),
+					key ? h('button', {
+						type: 'button', id: 'refresh', class: 'btn small', text: t('refresh'),
+						onclick: () => load(location.hash),
+					}) : null,
+					key ? h('span', {class: 'tipwrap'},
+						lockButton,
+						h('span', {class: 'tip', id: 'lock-help', role: 'tooltip', text: t('lock.help')})) : null);
+				return h('header', {class: 'masthead'},
+					h('div', {class: 'brand'}, h('h1', {text: 'Billion Context'}), h('span', {class: 'tagline', text: t('app.tagline')})),
+					controls);
 			}
 
-			async function dismiss(request, list) {
-				let id;
-				try {id = (await request.json())?.id;} catch { }
-				if (!validID(id)) return jsonResponse(400, {error: 'Invalid notice ID.'});
-				const ids = dismissed.get(list);
-				if (!ids.has(id)) {
-					ids.add(id);
-					if (ids.size > dismissLimit) ids.delete(ids.values().next().value);
-					try {localStorage.setItem('omp-billion-context.' + list, JSON.stringify([...ids]));} catch { }
+			function colophon() {
+				return h('footer', {class: 'colophon'},
+					h('p', {text: t('credit.text')}),
+					h('p', {}, h('a', {
+						class: 'link', href: 'https://github.com/ranxianglei/acp-kernel',
+						target: '_blank', rel: 'noreferrer noopener', text: t('credit.link'),
+					})));
+			}
+
+			function mainView() {
+				return h('main', {}, key ? journalNav() : null, noticeView(), viewBody());
+			}
+
+			function noticeView() {
+				if (noticeDismissed) return null;
+				return h('aside', {class: 'notice', id: 'priority-notice'},
+					h('p', {text: t('notice.body')}),
+					h('button', {type: 'button', id: 'dismiss-notice', class: 'btn small', text: t('notice.dismiss'), onclick: dismissNotice}));
+			}
+
+			function setNoticeDismissed(value) {
+				noticeDismissed = value;
+				try {
+					if (value) localStorage.setItem(savedNotice, 'dismissed');
+					else localStorage.removeItem(savedNotice);
+				} catch { }
+			}
+
+			function dismissNotice() {
+				setNoticeDismissed(true);
+				render();
+				focusView();
+			}
+
+			function restoreNotice() {
+				setNoticeDismissed(false);
+				render();
+				focusByID('dismiss-notice');
+			}
+
+			function focusByID(id) {
+				const node = byID(mount, id);
+				if (node && typeof node.focus === 'function') node.focus();
+			}
+
+			function viewBody() {
+				if (viewState.phase === 'error') return errorView(viewState.message, viewState.retry);
+				if (viewState.phase === 'loading') return loadingView(viewState.view);
+				if (viewState.phase === 'ready') {
+					if (viewState.view.kind === 'settings') {adoptMarkers(viewState.data); return settingsView();}
+					if (viewState.view.kind === 'overview') return overviewView(viewState.data);
+					if (viewState.view.kind === 'sessions') return sessionsView(viewState.view, viewState.data);
+					return detailView(viewState.view, viewState.data);
 				}
-				return jsonResponse(200, {ok: true});
+				return loginView(viewState.message);
 			}
 
-			async function filterOverview(response) {
-				if (![...dismissed.values()].some(ids => ids.size)) return response;
-				let data;
-				try {data = await response.clone().json();} catch {return response;}
-				if (!data || typeof data !== 'object') return response;
-				for (const [list, ids] of dismissed) {
-					if (ids.size && Array.isArray(data[list])) data[list] = data[list].filter(item => !ids.has(item?.id));
+			function loginView(message) {
+				const input = h('input', {
+					id: 'management-key', type: 'password', autocomplete: 'off', spellcheck: 'false',
+					'aria-describedby': 'status', required: true,
+				});
+				const submit = h('button', {type: 'submit', id: 'open', class: 'btn primary', text: t('login.submit')});
+				const status = h('p', {id: 'status', class: 'status', role: 'status'});
+				if (message) {
+					status.textContent = message;
+					input.setAttribute('aria-invalid', 'true');
 				}
-				return jsonResponse(response.status, data);
-			}
-
-			function normalizeHash() {
-				const hash = location.hash;
-				if (!hash || /^#\/(overview|sessions)$/.test(hash)) return;
-				if (/^#\/sessions?\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(hash)) return;
-				history.replaceState(history.state, '', '#/overview');
-			}
-
-			function showNativeUI(html, key) {
-				window.fetch = async (input, init) => {
-					const request = new Request(input, init);
-					const target = new URL(request.url);
-					if (target.origin !== location.origin || !target.pathname.startsWith(root)) return nativeFetch(request);
-					if (!key) return jsonResponse(401, {error: 'Reopen Billion Context with your CPA management key.'});
-					if (request.method === 'POST' && target.href === target.origin + target.pathname && dismissPaths.has(target.pathname)) {
-						return dismiss(request, dismissPaths.get(target.pathname));
-					}
-					if (request.method !== 'GET') return jsonResponse(405, {error: 'The CPA WebUI is read-only.'});
-					const response = await read(target.pathname + target.search, key, request.signal);
-					if (denied(response)) {
-						key = '';
-						clearSavedKey();
-						const warning = document.getElementById('cpa-webui-status');
-						if (warning) warning.textContent = 'CPA no longer accepts this key. Lock the WebUI and enter your current key.';
-					}
-					if (response.ok && target.pathname === root + 'overview' && !target.search) return filterOverview(response);
-					return response;
-				};
-				// Register before bili's router. document.open() clears existing listeners.
-				document.open();
-				normalizeHash();
-				window.addEventListener('hashchange', normalizeHash, true);
-				document.write(html.replace('id="changelog-body"', ''));
-				document.close();
-
-				const style = document.createElement('style');
-				style.textContent = `
-					.embed .topbar { display: flex; }
-					.embed [data-nav]:not([data-nav="overview"]):not([data-nav="sessions"]),
-					.embed .fork-link, #page-config, #page-connect, #page-logs, #page-updates, #page-blog,
-					#update-banner, #update-policy-banner,
-					#session-detail-view .k:has(+ .v > a[href^="#/logs?"]),
-					#session-detail-view .v:has(> a[href^="#/logs?"]) { display: none !important; }
-					#cpa-webui-notice {
-						display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem;
-						box-sizing: border-box; min-height: 0; padding: .25rem .5rem .25rem .75rem;
-						font-size: .8125rem; line-height: 1.4;
-						background: var(--bg-muted); border-bottom: 1px solid var(--border);
-					}
-					#cpa-webui-notice span { flex: 1 1 12rem; }
-					/* Let the title use the full width of its elastic column. */
-					.embed .twide .row-title,
-					.embed .twide .w-title { max-width: none; }
-					.embed .twide .row-title { flex: 0 1 auto; min-width: 0; }
-					.embed .twide .slink {
-						display: flex; align-items: center; column-gap: .4rem; min-width: 0;
-					}
-					.embed .twide .slink > .badge { flex: none; white-space: nowrap; }
-					.embed .twide .row-id {
-						flex: none; margin-top: 0; max-width: 5.5em;
-						font-size: 10.5px; line-height: 1.2;
-					}
-					@media (min-width: 721px) {
-						.embed .twide table.data:not(.columns-resized) colgroup col:nth-child(2) { width: 10rem !important; }
-						.embed .twide .client-cell { white-space: nowrap; overflow: hidden; }
-						.embed .twide .client-cell .w-client { max-width: calc(100% - 3rem); }
-					}
-					@media (max-width: 720px) {
-						.embed .twide table.data th:nth-child(2),
-						.embed .twide table.data td:nth-child(2),
-						.embed .twide table.data th:nth-child(4),
-						.embed .twide table.data td:nth-child(4) { display: none; }
-						.embed .twide table.data colgroup col:nth-child(2),
-						.embed .twide table.data colgroup col:nth-child(4) { width: 0 !important; }
-						.embed .twide .slink { flex-wrap: wrap; align-items: flex-start; row-gap: .15rem; }
-						.embed .twide .row-title {
-							flex: 1 1 100%;
-							display: -webkit-box; -webkit-box-orient: vertical;
-							-webkit-line-clamp: 2; white-space: normal;
+				const form = h('form', {
+					autocomplete: 'off', onsubmit: event => {
+						event.preventDefault();
+						const value = input.value.trim();
+						if (!value) {
+							status.textContent = t('login.required');
+							input.setAttribute('aria-invalid', 'true');
+							input.focus();
+							return;
 						}
+						open(value, {input, submit, status});
 					}
-				`;
-				document.head.append(style);
-				const notice = document.createElement('aside');
-				notice.id = 'cpa-webui-notice';
-				notice.setAttribute('aria-label', 'CPA WebUI access');
-				notice.innerHTML = `<span><strong>Router priority:</strong> If you use other model routers, set bili’s priority higher than theirs. Equal or unset priorities can let another router handle a request before compression. Overview and Sessions are read-only here.</span>
-					<button class="btn sm" type="button">Lock WebUI</button><span id="cpa-webui-status" role="status"></span>`;
-				notice.querySelector('button').addEventListener('click', () => {
-					key = '';
-					clearSavedKey();
-					location.reload();
-				});
-				document.body.prepend(notice);
+				},
+					h('label', {class: 'field', for: 'management-key'}, t('login.label'), input),
+					submit);
 
-				// Keep native links and keyboard navigation when bili replaces the table body.
-				const decorateRows = () => {
-					for (const body of document.querySelectorAll('#sessions-body, #recent-body')) {
-						for (const anchor of body.querySelectorAll('a.slink')) {
-							if (anchor.dataset.ompDecorated) continue;
-							anchor.dataset.ompDecorated = '1';
-							const name = anchor.querySelector('.row-title');
-							const handle = anchor.querySelector('.row-id');
-							const cells = anchor.closest('td')?.parentElement?.children || [];
-							const client = body.id === 'sessions-body' ? cells[1]?.textContent.trim() : '';
-							const upstream = body.id === 'sessions-body' ? cells[3]?.textContent.trim() : '';
-							const lines = [name?.textContent, client, upstream, handle?.textContent].filter(Boolean);
-							if (lines.length) anchor.title = lines.join('\n');
-						}
+				return h('section', {class: 'login', 'aria-labelledby': 'view-heading'},
+					h('h2', {id: 'view-heading', tabindex: '-1', text: t('login.heading')}),
+					h('p', {class: 'lead', text: t('login.lead')}),
+					form,
+					status);
+			}
+
+			function loadingView(view) {
+				const label = view.kind === 'sessions' ? t('loading.sessions') : view.kind === 'detail' ? t('loading.detail') : t('loading.overview');
+				const heading = view.kind === 'sessions' ? t('sessions.heading') : view.kind === 'detail' ? t('detail.blocks') : t('overview.saved');
+				return h('section', {'aria-busy': 'true', 'aria-labelledby': 'view-heading'},
+					h('h2', {id: 'view-heading', tabindex: '-1', text: heading}),
+					h('p', {class: 'status', role: 'status', text: label}),
+					h('div', {class: 'skeleton', 'aria-hidden': 'true'},
+						h('div'), h('div'), h('div'), h('div')));
+			}
+
+			function errorView(message, retryHash) {
+				return h('section', {'aria-labelledby': 'view-heading'},
+					h('h2', {id: 'view-heading', tabindex: '-1', text: t('error.title')}),
+					h('p', {class: 'status', role: 'alert', 'data-tone': 'bad', text: message}),
+					h('p', {},
+						h('button', {
+							type: 'button', id: 'retry', class: 'btn', text: t('retry'),
+							onclick: () => load(retryHash ?? location.hash),
+						}),
+						' ',
+						key ? h('button', {type: 'button', class: 'btn', text: t('lock.label'), onclick: lockDashboard}) : null));
+			}
+
+			function providerCacheView(data) {
+				const copy = {
+					en: {title: 'Provider cache · share of input tokens', read: 'Tokens read', write: 'Tokens written', coverage: 'Calls reporting cache reads', before: 'Before a fold', after: 'After a fold', compare: 'Compare fold and replay', note: 'Share of input tokens read from cache where both counts were reported. Missing usage is not a cache miss.', unknown: 'Not reported', none: 'No measurements yet'},
+					ru: {title: 'Кеш провайдера · доля входных токенов', read: 'Токены из кеша', write: 'Токены записи', coverage: 'Вызовы с данными о чтении', before: 'До свёртки', after: 'После свёртки', compare: 'Сравнить свёртку и повтор', note: 'Доля входных токенов из кеша для вызовов, в которых известны оба числа. Нет сведений — не значит промах.', unknown: 'Нет данных', none: 'Замеров пока нет'},
+					zh: {title: '提供商缓存 · 输入 token 占比', read: '缓存读取量', write: '缓存写入量', coverage: '报告缓存读取量的调用', before: '压缩前', after: '压缩后', compare: '比较压缩前后', note: '只统计同时报告读取量和输入量的调用。未报告不表示缓存未命中。', unknown: '未报告', none: '暂无测量值'}
+				}[language];
+				const c = data?.cache ?? {};
+				const ratio = x => finite(x?.ratio) === null ? copy.unknown : new Intl.NumberFormat(locale(), {style: 'percent', maximumFractionDigits: 1}).format(x.ratio);
+				const metric = (label, value) => h('div', {}, h('dt', {text: label}), h('dd', {text: value}));
+				const coverage = finite(c.requests) && finite(c.reported) !== null ? formatNumber(c.reported) + ' / ' + formatNumber(c.requests) : copy.none;
+				return h('section', {class: 'provider-cache', 'aria-labelledby': 'cache-label'},
+					h('div', {class: 'cache-head'}, h('h2', {id: 'cache-label', text: copy.title}), h('strong', {id: 'cache-share', text: ratio(c)})),
+					h('dl', {class: 'cache-readings'}, metric(copy.read, formatMetric(c.readTokens, copy.unknown)), metric(copy.write, formatMetric(c.writeTokens, copy.unknown)), metric(copy.coverage, coverage)),
+					h('details', {class: 'cache-comparison'}, h('summary', {text: copy.compare}), h('dl', {class: 'cache-readings'}, metric(copy.before, ratio(c.beforeFold)), metric(copy.after, ratio(c.afterFold))), h('p', {class: 'muted', text: copy.note})));
+			}
+
+			function ledgerCopy() {
+				return {ru: {journal: 'Журнал свёрток', overview: 'Обзор', sessions: 'Сессии', settings: 'Настройки', last: 'Последняя свёртка', empty: 'Пока нет сохранённых свёрток.', saved: 'Сохранена', block: 'Блок', inspect: 'Открыть сессию'}, en: {journal: 'Compression journal', overview: 'Overview', sessions: 'Sessions', settings: 'Settings', last: 'Latest fold', empty: 'No folds have been saved yet.', saved: 'Saved', block: 'Block', inspect: 'Open session'}, zh: {journal: '压缩日志', overview: '概览', sessions: '会话', settings: '设置', last: '最近一次压缩', empty: '尚无已保存的压缩块。', saved: '已保存', block: '压缩块', inspect: '打开会话'}}[language];
+			}
+
+			function journalNav() {
+				const copy = ledgerCopy(); const route = parseView(location.hash)?.kind;
+				return h('nav', {class: 'journal-nav', 'aria-label': copy.journal}, ['overview', 'sessions', 'settings'].map(k => h('a', {href: '#/' + k, 'aria-current': (k === route || k === 'sessions' && route === 'detail') ? 'page' : null, text: copy[k]})));
+			}
+
+			function latestFoldView(fold) {
+				const c = ledgerCopy(); const body = [];
+				if (fold?.session && safeID.test(fold.session.id) && fold.block) {
+					body.push(h('p', {class: 'latest-state', text: c.saved + ' · ' + c.block + ' ' + text(fold.block.id)}), h('strong', {class: 'latest-value', text: formatMetric(fold.block.tokensSaved)}), h('p', {class: 'muted', text: t('overview.saved')}));
+					if (Array.isArray(fold.events)) body.push(h('ol', {class: 'latest-events'}, fold.events.map(e => h('li', {}, h('time', {datetime: e.at, text: formatDate(e.at)}), h('span', {text: eventLabel(e.kind)})))));
+					body.push(h('a', {class: 'link', href: '#/sessions/' + fold.session.id, text: c.inspect}));
+				} else body.push(h('p', {class: 'muted', text: c.empty}));
+				return h('aside', {class: 'fold-receipt'}, h('h2', {text: c.last}), body);
+			}
+
+			function overviewView(data) {
+				adoptMarkers(data);
+				const c = ledgerCopy(); const recent = Array.isArray(data.recent) ? data.recent.filter(item => item && typeof item === 'object') : [];
+				return h('div', {class: 'journal'},
+					h('h2', {class: 'journal-title', id: 'view-heading', tabindex: '-1', text: c.journal}),
+					h('div', {class: 'journal-metrics'}, h('section', {class: 'journal-savings'},
+						h('h3', {text: t('overview.saved')}), h('strong', {class: 'saved-value', text: formatMetric(data.tokensSaved)}),
+						h('p', {class: 'muted', text: c.sessions + ': ' + formatMetric(data.sessions) + ' · ' + t('overview.blocks') + ': ' + formatMetric(data.blocks)})), providerCacheView(data)),
+					h('div', {class: 'journal-body'}, h('section', {class: 'journal-list', 'aria-labelledby': 'recent-heading'},
+						h('div', {class: 'section-head'}, h('h2', {id: 'recent-heading', text: t('overview.recent')}), h('a', {class: 'link', id: 'all-sessions', href: '#/sessions', text: t('overview.all')})),
+						recent.length ? sessionTable(recent, t('overview.recent')) : h('p', {class: 'empty', text: t('overview.empty')})), latestFoldView(data.latestFold)));
+			}
+
+			function sessionsView(view, data) {
+				const rows = Array.isArray(data.sessions) ? data.sessions.filter(item => item && typeof item === 'object') : [];
+				const total = finite(data.total);
+				const search = h('input', {
+					type: 'search', id: 'search', name: 'q', value: view.q,
+					placeholder: t('sessions.search'), 'aria-label': t('sessions.search'),
+				});
+				const form = h('form', {
+					class: 'search', role: 'search', onsubmit: event => {
+						event.preventDefault();
+						go(sessionsHash({page: 1, q: search.value.trim().slice(0, 200)}));
 					}
-				};
-				const rowObserver = new MutationObserver(decorateRows);
-				for (const body of document.querySelectorAll('#sessions-body, #recent-body')) {
-					rowObserver.observe(body, {childList: true});
+				},
+					search,
+					h('button', {type: 'submit', class: 'btn', text: t('sessions.searchButton')}),
+					view.q ? h('a', {class: 'btn', href: sessionsHash({page: 1, q: ''}), text: t('sessions.clear')}) : null);
+
+				const pages = Math.max(1, Math.ceil((total ?? rows.length) / pageSize));
+				const pager = h('div', {class: 'pager'},
+					h('span', {text: total === null ? '' : t('sessions.page', {page: String(view.page), pages: String(pages)})}),
+					h('span', {class: 'pairs'},
+						view.page > 1
+							? h('a', {class: 'btn small', href: sessionsHash({page: view.page - 1, q: view.q}), text: t('sessions.prev')})
+							: h('span', {class: 'btn small', 'aria-disabled': 'true', text: t('sessions.prev')}),
+						view.page < pages
+							? h('a', {class: 'btn small', href: sessionsHash({page: view.page + 1, q: view.q}), text: t('sessions.next')})
+							: h('span', {class: 'btn small', 'aria-disabled': 'true', text: t('sessions.next')})));
+
+				return h('section', {'aria-labelledby': 'view-heading'},
+					h('div', {class: 'section-head'},
+						h('h2', {id: 'view-heading', tabindex: '-1', text: t('sessions.heading')}),
+						total === null ? null : h('span', {class: 'muted', id: 'session-total', text: t('sessions.total', {n: formatNumber(total)})})),
+					form,
+					rows.length
+						? sessionTable(rows, t('sessions.heading'))
+						: h('p', {class: 'empty', text: view.q ? t('sessions.noMatch', {q: view.q}) : t('sessions.empty')}),
+					rows.length ? pager : null);
+			}
+
+			function detailView(view, data) {
+				const session = data.session && typeof data.session === 'object' ? data.session : null;
+				if (!session) {
+					return h('section', {'aria-labelledby': 'view-heading'},
+						h('h2', {id: 'view-heading', tabindex: '-1', text: t('error.title')}),
+						h('p', {class: 'status', role: 'alert', 'data-tone': 'bad', text: t('error.notFound')}),
+						h('p', {}, h('a', {class: 'link', href: lastSessionsHash, text: t('detail.back')})));
 				}
-				decorateRows();
 
-				window.addEventListener('pagehide', () => {key = '';}, {once: true});
-				window.addEventListener('pageshow', event => {
-					if (event.persisted) location.reload();
+				const blocks = Array.isArray(data.blocks) ? data.blocks.filter(item => item && typeof item === 'object') : [];
+				const events = Array.isArray(data.events) ? data.events.filter(item => item && typeof item === 'object') : [];
+				const updated = formatDate(session.updatedAt);
+
+				const facts = h('dl', {class: 'detail-facts'},
+					h('div', {class: 'lead'},
+						h('dt', {text: t('overview.saved')}),
+						h('dd', {text: formatMetric(session.tokensSaved, t('detail.unknown'))})),
+					h('div', {},
+						h('dt', {text: t('detail.id')}),
+						h('dd', {}, h('code', {text: text(session.id)}))),
+					text(session.model) ? h('div', {}, h('dt', {text: t('detail.model')}), h('dd', {text: session.model})) : null,
+					text(session.protocol) ? h('div', {}, h('dt', {text: t('detail.protocol')}), h('dd', {text: session.protocol})) : null,
+					updated ? h('div', {}, h('dt', {text: t('detail.updated')}), h('dd', {}, h('time', {datetime: session.updatedAt, text: updated}))) : null);
+
+				const blocksTable = blocks.length
+					? h('table', {class: 'table blocks'},
+						h('caption', {class: 'sr-only', text: t('detail.blocks')}),
+						h('thead', {}, h('tr', {},
+							h('th', {scope: 'col', text: t('table.blocks')}),
+							h('th', {scope: 'col', text: t('detail.blocks')}),
+							h('th', {scope: 'col', class: 'num', text: t('table.saved')}))),
+						h('tbody', {}, blocks.map((block, index) => h('tr', {},
+							h('td', {text: text(block.id) || '#' + (index + 1)}),
+							h('td', {class: 'summary', text: text(block.summary)}),
+							h('td', {class: 'num', text: formatMetric(block.tokensSaved)})))))
+					: h('p', {class: 'empty', text: t('detail.noBlocks')});
+
+				const eventsList = events.length
+					? h('div', {},
+						h('p', {class: 'totals-note', text: t('detail.disclosure')}),
+						h('ul', {class: 'events'}, events.map(event => {
+							const at = formatDate(event.at);
+							const message = text(event.message);
+							return h('li', {},
+								h('div', {class: 'event-head'},
+									h('span', {class: 'event-kind', text: eventLabel(event.kind)}),
+									at ? h('time', {class: 'event-time', datetime: event.at, text: at}) : null),
+								message ? h('details', {class: 'diag'},
+									h('summary', {text: t('detail.eventDetails')}),
+									h('pre', {text: message})) : null);
+						})))
+					: h('p', {class: 'empty', text: t('detail.noEvents')});
+
+				return h('section', {'aria-labelledby': 'view-heading'},
+					h('a', {class: 'link backlink', id: 'back', href: lastSessionsHash, text: '← ' + t('detail.back')}),
+					h('h2', {id: 'view-heading', tabindex: '-1', text: text(session.title).trim() || t('session.untitled')}),
+					session.legacy === true
+						? h('p', {class: 'legacy-note'}, h('span', {class: 'badge', text: t('session.legacy')}), ' ' + t('session.legacyNote'))
+						: null,
+					h('p', {class: 'muted', text: t('detail.blocksCount', {n: formatNumber(blocks.length)})}),
+					facts,
+					providerCacheView(data),
+					h('section', {class: 'section', 'aria-labelledby': 'blocks-heading'},
+						h('div', {class: 'section-head'}, h('h2', {id: 'blocks-heading', text: t('detail.blocks')})),
+						blocksTable),
+					h('section', {class: 'section', 'aria-labelledby': 'events-heading'},
+						h('div', {class: 'section-head'}, h('h2', {id: 'events-heading', text: t('detail.events')})),
+						eventsList));
+			}
+
+			function sessionTable(rows, caption) {
+				return h('table', {class: 'table'},
+					h('caption', {class: 'sr-only', text: caption}),
+					h('thead', {}, h('tr', {},
+						h('th', {scope: 'col', text: t('table.session')}),
+						h('th', {scope: 'col', class: 'col-model', text: t('table.model')}),
+						h('th', {scope: 'col', class: 'col-proto', text: t('table.protocol')}),
+						h('th', {scope: 'col', class: 'col-updated', text: t('table.updated')}),
+						h('th', {scope: 'col', class: 'num', text: t('table.blocks')}),
+						h('th', {scope: 'col', class: 'num', text: t('table.saved')}))),
+					h('tbody', {}, rows.map(sessionRow)));
+			}
+
+			function sessionRow(session) {
+				const id = text(session.id);
+				const title = text(session.title).trim() || t('session.untitled');
+				const updated = formatDate(session.updatedAt);
+				const linkable = safeID.test(id);
+				const name = linkable
+					? h('a', {class: 'rowlink', href: '#/sessions/' + encodeURIComponent(id), text: title})
+					: h('span', {class: 'rowlink', text: title});
+				const meta = [text(session.model), text(session.protocol), updated].filter(Boolean).join(' · ');
+				return h('tr', {},
+					h('td', {class: 'cell-title'}, name,
+						session.legacy ? null : h('span', {class: 'row-outcome', text: session.lastEvent ? eventLabel(session.lastEvent) : ({ru: 'Нет записанных попыток', en: 'No attempts recorded', zh: '尚无已记录的尝试'}[language])}),
+						session.legacy === true ? h('span', {class: 'badge', text: t('session.legacy')}) : null,
+						meta ? h('span', {class: 'rowmeta', text: meta}) : null),
+					h('td', {class: 'col-model'}, h('code', {text: text(session.model)})),
+					h('td', {class: 'col-proto', text: text(session.protocol)}),
+					h('td', {class: 'col-updated'}, updated ? h('time', {datetime: session.updatedAt, text: updated}) : null),
+					h('td', {class: 'num', text: formatMetric(session.blocks)}),
+					h('td', {class: 'num', text: formatMetric(session.tokensSaved)}));
+			}
+
+			function settingsView() {
+				const reported = typeof markers === 'boolean';
+				const input = h('input', {
+					type: 'checkbox', id: 'markers', role: 'switch', checked: markers === true, disabled: !reported,
 				});
+				const state = h('span', {id: 'marker-state', text: reported ? (markers ? t('settings.shown') : t('settings.hidden')) : t('settings.unreported')});
+				const status = h('p', {class: 'status', id: 'marker-status', role: 'status'});
+				input.addEventListener('change', () => saveMarkers(input, state, status));
+
+				return h('section', {class: 'settings', 'aria-labelledby': 'settings-heading'},
+					h('div', {class: 'section-head'}, h('h2', {id: 'settings-heading', text: t('settings.heading')})),
+					h('div', {class: 'setting-row'},
+						h('div', {class: 'setting-copy'},
+							h('p', {}, h('strong', {text: t('settings.label')})),
+							h('p', {class: 'help', text: t('settings.help')})),
+						h('label', {class: 'switch'}, input, state)),
+					status,
+					noticeDismissed
+						? h('button', {
+							type: 'button', id: 'restore-notice', class: 'btn small', text: t('settings.showNotice'),
+							onclick: restoreNotice,
+						})
+						: null);
+			}
+
+			function adoptMarkers(data) {
+				markers = typeof data.visibilityMarkers === 'boolean' ? data.visibilityMarkers : null;
+			}
+
+			function markerLabel(state, value) {
+				state.textContent = value ? t('settings.shown') : t('settings.hidden');
+			}
+
+			async function saveMarkers(input, state, status) {
+				if (markersSaving) return;
+				const wanted = input.checked === true;
+				const previous = markers;
+				const token = ++markerToken;
+				markersSaving = true;
+				input.disabled = true;
+				status.removeAttribute('data-tone');
+				status.textContent = t('settings.saving');
+				let response = null;
+				try {
+					response = await read('/__bili/settings', {method: 'PUT', body: {visibilityMarkers: wanted}});
+				} catch {
+					response = null;
+				}
+				if (token !== markerToken) return;
+				markersSaving = false;
+				input.disabled = false;
+				if (!response) {
+					input.checked = previous === true;
+					status.setAttribute('data-tone', 'bad');
+					status.textContent = t('settings.failed');
+					return;
+				}
+				if (response.status === 401 || response.status === 403) {
+					lockOut(t('error.rejected'));
+					return;
+				}
+				if (!response.ok) {
+					input.checked = previous === true;
+					status.setAttribute('data-tone', 'bad');
+					status.textContent = failureMessage(response.status);
+					return;
+				}
+				let body = null;
+				try {body = await response.json();} catch {body = null;}
+				if (token !== markerToken) return;
+				const confirmed = body && typeof body === 'object' ? body.visibilityMarkers : undefined;
+				if (confirmed === wanted) {
+					markers = confirmed;
+					input.checked = markers;
+					markerLabel(state, markers);
+					status.setAttribute('data-tone', 'ok');
+					status.textContent = t('settings.saved');
+					return;
+				}
+				if (typeof confirmed === 'boolean') {
+					markers = confirmed;
+					input.checked = markers;
+					markerLabel(state, markers);
+				} else {
+					input.checked = previous === true;
+				}
+				status.setAttribute('data-tone', 'bad');
+				status.textContent = t('settings.failed');
+			}
+
+			function setLanguage(named) {
+				if (!languages.includes(named) || named === language) return;
+				language = named;
+				try {localStorage.setItem(savedLanguage, named);} catch { }
+				render();
+			}
+
+			function lockDashboard() {
+				key = '';
+				openGeneration++;
+				viewToken++;
+				clearSavedKey();
+				viewState = {phase: 'login', message: ''};
+				render();
+				location.reload();
 			}
 
 			// Locking in one tab must revoke the live key everywhere, including an
@@ -251,49 +2141,148 @@
 				location.reload();
 			});
 
-			async function open(candidate) {
+			async function open(candidate, ui) {
 				const generation = ++openGeneration;
-				input.value = '';
-				input.removeAttribute('aria-invalid');
-				button.disabled = true;
-				progress.hidden = false;
-				status.textContent = 'Opening the bili WebUI…';
+				const input = ui?.input ?? null;
+				const submit = ui?.submit ?? null;
+				const status = ui?.status ?? null;
+				if (input) input.setAttribute('aria-invalid', 'false');
+				if (submit) {
+					submit.disabled = true;
+					submit.textContent = t('login.busy');
+				}
+				if (status) {
+					status.removeAttribute('data-tone');
+					status.textContent = t('login.busy');
+				}
+				let response = null;
+				let failed = false;
 				try {
-					const response = await read(root, candidate, AbortSignal.timeout(35000));
-					// A lock in another tab wins over an open already in flight,
-					// otherwise this tab would store the cleared key again.
-					if (generation !== openGeneration) return;
-					if (denied(response)) {
-						clearSavedKey();
-						input.setAttribute('aria-invalid', 'true');
-						status.textContent = 'CPA rejected the key. Enter your current CPA management key.';
-					} else if (!response.ok || !response.headers.get('Content-Type')?.startsWith('text/html')) {
-						status.textContent = 'Could not open the bili WebUI (HTTP ' + response.status + '). Try again.';
-					} else {
-						const html = await response.text();
-						if (generation !== openGeneration) return;
-						try {localStorage.setItem(savedKey, candidate);} catch { }
-						showNativeUI(html, candidate);
-						return;
-					}
+					response = await read('/__bili/overview', {candidate, signal: AbortSignal.timeout(20000)});
 				} catch {
-					if (generation !== openGeneration) return;
-					status.textContent = 'Could not connect to the bili WebUI. Try again.';
+					failed = true;
 				}
 				if (generation !== openGeneration) return;
-				progress.hidden = true;
-				button.disabled = false;
-				input.focus();
+				if (submit) {
+					submit.disabled = false;
+					submit.textContent = t('login.submit');
+				}
+				if (input) input.value = '';
+				const restore = message => {
+					if (status) {
+						status.setAttribute('data-tone', 'bad');
+						status.textContent = message;
+					}
+					if (input) {
+						input.setAttribute('aria-invalid', 'true');
+						input.focus();
+					}
+				};
+				if (failed) {
+					restore(t('login.offline'));
+					return;
+				}
+				if (response.status === 401 || response.status === 403) {
+					clearSavedKey();
+					restore(t('login.rejected'));
+					return;
+				}
+				if (!response.ok) {
+					restore(t('login.unreachable', {status: String(response.status)}));
+					return;
+				}
+				let data = null;
+				try {data = await response.json();} catch {data = null;}
+				if (generation !== openGeneration) return;
+				if (!data || typeof data !== 'object' || Array.isArray(data)) {
+					restore(t('login.unreachable', {status: String(response.status)}));
+					return;
+				}
+				if (generation !== openGeneration) return;
+				try {localStorage.setItem(savedKey, candidate);} catch { }
+				key = candidate;
+				viewState = {phase: 'ready', view: {kind: 'overview'}, data};
+				render();
+				await load(location.hash, data);
 			}
 
-			form.addEventListener('submit', event => {
-				event.preventDefault();
-				if (!button.disabled) open(input.value);
+			async function load(hash, preload) {
+				const view = parseView(hash);
+				if (!view) {
+					history.replaceState(null, '', '#/overview');
+					return load('#/overview', preload);
+				}
+				if (view.kind === 'detail' && !safeID.test(view.id)) {
+					viewState = {phase: 'error', message: t('error.invalid'), retry: lastSessionsHash};
+					render();
+					return;
+				}
+				if (view.kind === 'sessions') lastSessionsHash = hash;
+				if (!key) {
+					viewState = {phase: 'login', message: ''};
+					render();
+					return;
+				}
+				if (view.kind === 'overview' && preload && typeof preload === 'object') {
+					viewState = {phase: 'ready', view, data: preload};
+					render();
+					return;
+				}
+				const token = ++viewToken;
+				viewState = {phase: 'loading', view};
+				render();
+				let response = null;
+				let failed = false;
+				try {
+					response = await read(targetFor(view), {signal: AbortSignal.timeout(20000)});
+				} catch {
+					failed = true;
+				}
+				if (token !== viewToken || !key) return;
+				if (failed) {
+					viewState = {phase: 'error', message: t('error.offline'), retry: hash};
+					render();
+					return;
+				}
+				if (response.status === 401 || response.status === 403) {
+					lockOut(t('error.rejected'));
+					return;
+				}
+				if (!response.ok) {
+					viewState = {phase: 'error', message: failureMessage(response.status), retry: hash};
+					render();
+					return;
+				}
+				let data = null;
+				try {data = await response.json();} catch {data = null;}
+				if (token !== viewToken || !key) return;
+				if (!data || typeof data !== 'object' || Array.isArray(data)) {
+					viewState = {phase: 'error', message: t('error.read'), retry: hash};
+					render();
+					return;
+				}
+				viewState = {phase: 'ready', view, data};
+				render();
+				if (view.kind !== 'overview') focusView();
+			}
+
+			window.addEventListener('hashchange', () => {
+				if (key) load(location.hash);
+				else render();
 			});
-			let key;
-			let openGeneration = 0;
-			try {key = localStorage.getItem(savedKey);} catch { }
-			if (key) open(key);
+
+			window.addEventListener('pagehide', () => {key = '';}, {once: true});
+			window.addEventListener('pageshow', event => {
+				if (event.persisted) location.reload();
+			});
+
+			const stored = storeGet(savedKey);
+			if (stored) {
+				key = stored;
+				load(location.hash);
+			} else {
+				render();
+			}
 		})();
 	</script>
 </body>

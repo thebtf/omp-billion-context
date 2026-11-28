@@ -35,6 +35,7 @@ const preflightSummary = 'VISIBLE_PREFLIGHT: Earlier turns selected the syntheti
 const hiddenReasoning = 'SYNTHETIC_REASONING_MUST_NOT_BE_USED_AS_A_SUMMARY';
 let summaryMode;
 let requestedFold = false;
+let repair;
 let streamTail;
 
 const upstream = createServer(async (req, res) => {
@@ -44,6 +45,20 @@ const upstream = createServer(async (req, res) => {
 		const body = JSON.parse(Buffer.concat(chunks));
 		requests.push({ path: req.url, auth: req.headers.authorization, engineToken: req.headers['x-omp-bili-access'], body });
 		const base = { id: 'chatcmpl-smoke', created: 1, model: body.model };
+		if (repair && !body.stream && body.tools?.length) {
+			const attempt = ++repair.calls;
+			if (attempt <= 2) {
+				const summary = attempt === 1 && repair.kind === 'length' ? 'x'.repeat(21150) : foldSummary;
+				const content = attempt === 1 && repair.kind === 'format' ? 'invalid range header' : JSON.stringify([{ startId: 'm00001', endId: 'm00004', summary }]);
+				const tool = { id: `call_repair_${attempt}`, type: 'function', function: { name: 'compress', arguments: JSON.stringify({ content }) } };
+				res.writeHead(200, { 'content-type': 'application/json' });
+				return res.end(JSON.stringify({ ...base, object: 'chat.completion', usage: { prompt_tokens: 100, prompt_tokens_details: { cached_tokens: 80 }, completion_tokens: 1, total_tokens: 101 }, choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls: [tool] }, finish_reason: 'tool_calls' }] }));
+			}
+		}
+		if (summaryMode && body.tools?.length && JSON.stringify(body.messages).length > 750000) {
+			res.writeHead(400, { 'content-type': 'application/json' });
+			return res.end(JSON.stringify({ error: { code: 'context_length_exceeded', type: 'invalid_request_error', message: 'The request exceeds the context window.' } }));
+		}
 		if (body.stream) {
 			res.writeHead(200, { 'content-type': 'text/event-stream' });
 			if (summaryMode && !body.tools?.length) {
@@ -72,7 +87,7 @@ const upstream = createServer(async (req, res) => {
 			if (summaryMode && !body.tools?.length) {
 				return res.end(JSON.stringify({ ...base, object: 'chat.completion', choices: [{ index: 0, message: { role: 'assistant', content: summaryMode === 'json' ? preflightSummary : null, reasoning_content: hiddenReasoning }, finish_reason: 'stop' }] }));
 			}
-			res.end(JSON.stringify({ ...base, object: 'chat.completion', choices: [{ index: 0, message: { role: 'assistant', content: 'smoke-ok' }, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 } }));
+			res.end(JSON.stringify({ ...base, object: 'chat.completion', choices: [{ index: 0, message: { role: 'assistant', content: 'smoke-ok' }, finish_reason: 'stop' }], usage: { prompt_tokens: 5, prompt_tokens_details: { cached_tokens: 2 }, completion_tokens: 1, total_tokens: 6 } }));
 		}
 	} catch {
 		res.writeHead(500).end();
@@ -282,31 +297,33 @@ try {
 	assert.deepEqual(await engineDirs(), [], 'Reading the shell and making denied requests must not start bili');
 	await assert.rejects(stat(join(dataRoot, 'runtime')), { code: 'ENOENT' });
 
-	const embed = await readWebUI('/__bili/?embed=0');
-	assert.equal(embed.status, 200);
-	assert.match(embed.headers.get('content-type'), /^text\/html\b/);
-	const nativeHTML = await embed.text();
-	assert.match(nativeHTML, /<body class="embed">/);
-	assert.match(nativeHTML, /class="ver">v0\.1\.216/);
-	assert.match(nativeHTML, /id="st-sessions"/);
-	assert.match(nativeHTML, /data-nav="sessions"/);
-	assert(!nativeHTML.includes(managementKey));
-	assert(!nativeHTML.includes('X-Omp-Bili-Access'));
+	const savedMarkers = async () => {
+		const response = await readWebUI('/__bili/settings');
+		assert.equal(response.status, 200, await response.clone().text());
+		return (await response.json()).visibilityMarkers;
+	};
+	const setMarkers = async (visibilityMarkers, headers = managementHeaders) => bridge(bridgeTarget('/__bili/settings'), {
+		method: 'PUT', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ visibilityMarkers }),
+	});
+	assert.equal((await setMarkers(false, {})).status, 401);
+	assert.equal(await savedMarkers(), true);
+	assert.equal((await setMarkers(false)).status, 200);
+	assert.equal(await savedMarkers(), false);
 	const initialOverview = await readWebUI('/__bili/overview');
 	assert.equal(initialOverview.status, 200, await initialOverview.clone().text());
-	assert.equal((await initialOverview.json()).overview.requests, 0);
+	assert.equal((await initialOverview.json()).sessions, 0);
 	const runtimeParent = join(dataRoot, 'runtime');
 	const installed = (await readdir(runtimeParent, { withFileTypes: true })).filter(entry => entry.isDirectory());
 	assert.equal(installed.length, 1, 'Cold startup must publish one complete runtime');
 	const runtimeRoot = join(runtimeParent, installed[0].name);
 	const completion = JSON.parse(await readFile(join(runtimeRoot, 'version.json'), 'utf8'));
-	assert.equal(completion.schema, 1);
-	assert.equal(completion.bili_version, '0.1.216');
 	assert.equal(completion.node_version, '24.22.3');
-	assert.equal(installed[0].name, `${completion.bili_version}-${completion.node_version}-${completion.platform}-${completion.archive_sha256}`);
 	const originalRuntime = await runtimeSnapshot(runtimeParent);
 	assert(originalRuntime.some(file => /\/version\.json$/.test(file.name)));
 	assert(originalRuntime.some(file => /\/node(?:\.exe)?$/.test(file.name)));
+	assert(originalRuntime.some(file => file.name.endsWith('/kernel/worker.mjs')));
+	assert(originalRuntime.some(file => file.name.endsWith('/node_modules/acp-kernel/package.json')));
+	assert(!originalRuntime.some(file => file.name.includes('/node_modules/billion-context/')));
 	console.log('CPA discovered the Billion Context menu and opened the native bili overview before any model traffic');
 
 	const messages = [{ role: 'user', content: 'Synthetic conversation' }];
@@ -410,7 +427,7 @@ try {
 		assert.equal(received.body.model, target);
 		assert.equal(received.auth, account);
 		const sessions = await (await readWebUI('/__bili/sessions?page=1&pageSize=20')).json();
-		const anthropicSessions = (sessions.sessions ?? []).filter(item => item.protocol === 'anthropic').length;
+		const anthropicSessions = (sessions.sessions ?? []).filter(item => item.protocol === 'claude').length;
 		assert(anthropicSessions > 0, 'bili must record the Anthropic conversation');
 		assert(received.body.tools?.some(tool => ['acp_status', 'compress', 'acp_compress'].includes(tool.name ?? tool.function?.name)),
 			`An Anthropic request must carry bili's own tool, which proves it entered bili. tools=${JSON.stringify(received.body.tools?.map(tool => tool.name ?? tool.function?.name))}`);
@@ -454,26 +471,19 @@ try {
 
 	const overview = await readWebUI('/__bili/overview');
 	assert.equal(overview.status, 200);
-	const { version, overview: counters } = await overview.json();
-	assert.equal(version, '0.1.216');
-	assert(counters.live > 0 && counters.requests > 0, JSON.stringify(counters));
+	const counters = await overview.json();
+	assert(counters.sessions > 0 && counters.cpaCompression, JSON.stringify(counters));
 	const sessions = await readWebUI('/__bili/sessions?page=1&pageSize=20');
 	assert.equal(sessions.status, 200);
 	const sessionPage = await sessions.json();
-	const session = sessionPage.sessions.find(item => item.live);
+	const session = sessionPage.sessions.find(item => !item.legacy);
 	assert(session?.id, 'The native Sessions list must include a live session from the model requests');
 	const detail = await readWebUI(`/__bili/sessions/${encodeURIComponent(session.id)}/detail`);
 	assert.equal(detail.status, 200);
-	assert.equal((await detail.json()).id, session.id);
+	assert.equal((await detail.json()).session.id, session.id);
 	console.log('Native Overview and Sessions reflected CPA model requests');
 
-	const engines = await engineDirs();
-	assert.equal(engines.length, 1, 'CPA must start exactly one bundled engine');
-	const engineConfig = JSON.parse(await readFile(join(dataRoot, 'instances', engines[0], 'bili.json'), 'utf8'));
-	const unauthorizedEngine = await fetch(`http://127.0.0.1:${engineConfig.port}/__bili/stats`);
-	assert.equal(unauthorizedEngine.status, 403);
-	await unauthorizedEngine.text();
-	assert(requests.every(request => request.engineToken === undefined), 'The engine access token must not reach the backend');
+	assert(requests.every(request => request.engineToken === undefined), 'Private worker state must not reach the provider');
 
 	const history = Array.from({ length: 12 }, (_, index) => ({
 		role: index % 2 ? 'assistant' : 'user',
@@ -484,6 +494,7 @@ try {
 	const foldedText = await folded.text();
 	assert.equal(folded.status, 200, foldedText);
 	assert.match(foldedText, /smoke-ok/);
+	assert(!foldedText.includes('[ACP]'), 'Disabling notifications must keep markers out of client output');
 	assert(!foldedText.includes('call_smoke'), 'The client must not execute the compression tool');
 	assert(requestedFold);
 	const replay = requests.slice(beforeFold + 1).find(({ body }) => JSON.stringify(body.messages).includes(foldSummary));
@@ -526,6 +537,30 @@ try {
 	assert(foldedSessionId);
 	console.log('Bundled bili folded history; CPA preserved the account, cache key and prefix; caller state stayed isolated');
 
+	for (const kind of ['format', 'length']) {
+		const notifications = kind === 'length';
+		assert.equal((await setMarkers(notifications)).status, 200);
+		repair = { kind, calls: 0 };
+		const start = requests.length;
+		const result = await call('chat/completions', { model, messages: history }, { 'x-acp-session': 'smoke-repair-' + kind });
+		const message = await result.text();
+		assert.equal(result.status, 200, message);
+		assert.equal(repair.calls, 3, 'One rejected tool, one repaired tool and one final answer');
+		assert.match(message, /smoke-ok/);
+		assert(!message.includes('call_repair_') && !message.includes('x'.repeat(100)));
+		assert.equal(message.includes('[ACP]'), notifications, 'Only the successful marker is visible, and only when enabled');
+		assert(JSON.stringify(requests[start + 2].body.messages).includes(foldSummary));
+		assert(!JSON.stringify(requests[start + 2].body.messages).includes(`${foldMarker}1 `.repeat(10)));
+		repair = undefined;
+	}
+	assert.equal((await setMarkers(false)).status, 200);
+	const cacheStats = (await (await readWebUI('/__bili/overview')).json()).cache;
+	assert(cacheStats.reported > 0 && cacheStats.reported <= cacheStats.requests);
+	assert(cacheStats.readTokens > 0 && cacheStats.ratio > 0 && cacheStats.ratio <= 1);
+	assert.equal(cacheStats.beforeFold?.ratio, 0.8, JSON.stringify(cacheStats));
+	assert.equal(cacheStats.afterFold?.ratio, 0.4, JSON.stringify(cacheStats));
+	console.log('The fixture reported cache usage before and after an actual fold; missing reports are not cache misses');
+
 	async function eventually(check, message, milliseconds = 10000) {
 		const deadline = Date.now() + milliseconds;
 		do {
@@ -547,10 +582,6 @@ try {
 			return plugin?.registered && plugin.effective_enabled && plugin.priority === priority;
 		}, `CPA did not finish reconfigure with priority ${priority}`);
 	}
-	async function assertEngineStopped(config, instance) {
-		assert(!(await engineDirs()).includes(instance), 'Quiesce must remove the retired private instance');
-		await assert.rejects(fetch(`http://127.0.0.1:${config.port}/__bili/health`, { signal: AbortSignal.timeout(1000) }), 'Retired engine must no longer listen');
-	}
 	async function assertStoredFold() {
 		const row = (await savedSessions()).find(item => item.id === foldedSessionId);
 		assert(row, 'The historic session must be in the WebUI before the client sends any replay');
@@ -566,14 +597,10 @@ try {
 		assert.equal(otherClient.status, 200, await otherClient.text());
 		assert(!JSON.stringify(requests.at(-1).body.messages).includes(foldSummary), 'Restoration must keep CPA callers isolated');
 	}
-	async function coldRecovery(previous) {
-		assert.deepEqual(await engineDirs(), [], 'Completed quiesce must leave recovery lazy');
+	async function coldRecovery() {
 		await assertStoredFold();
-		const instances = await engineDirs();
-		assert.equal(instances.length, 1);
-		assert.notEqual(instances[0], previous, 'Recovery needs a new private generation');
-		assert.deepEqual(await runtimeSnapshot(runtimeParent), originalRuntime, 'Recovery reuses the immutable shared runtime');
-		return { instance: instances[0], config: JSON.parse(await readFile(join(dataRoot, 'instances', instances[0], 'bili.json'), 'utf8')) };
+		assert.equal(await savedMarkers(), false);
+		assert.deepEqual(await runtimeSnapshot(runtimeParent), originalRuntime, 'Recovery reuses the immutable runtime');
 	}
 	async function publishLibrary(version, source) {
 		const staged = join(scratch, `replacement-${version}${extname(pluginPath)}`);
@@ -585,7 +612,6 @@ try {
 	}
 
 	await reconfigure(11);
-	assert.deepEqual(await engineDirs(), engines, 'Ordinary reconfigure must keep the running engine identity');
 	const preserved = await call('chat/completions', { model, stream: true, messages: followup, prompt_cache_key: 'existing-cache-key' }, cycleHeaders);
 	assert.equal(preserved.status, 200, await preserved.text());
 	assert.equal(JSON.stringify(requests.at(-1).body.messages.slice(0, anchor + 1)), JSON.stringify(replay.body.messages.slice(0, anchor + 1)), 'Ordinary reconfigure must preserve the summary and provider prefix');
@@ -611,7 +637,6 @@ try {
 		await eventually(() => cpa.log.slice(logStart).includes('plugin quiesce failed'), 'Held stream did not refuse replacement');
 		assert(Date.now() - started < 6500, 'CPA must receive bounded busy refusal without canceling the stream');
 		assert(!cpa.log.slice(logStart).includes('failed to load plugin'), 'Busy quiesce must abort before invalid-library loading');
-		assert.deepEqual(await engineDirs(), engines, 'Busy refusal must keep the same private engine');
 		await rm(invalidBusy, { force: true });
 		releaseBusy();
 		for (; ;) {
@@ -624,16 +649,14 @@ try {
 		releaseBusy?.();
 		streamTail = undefined;
 	}
-	assert.deepEqual(await engineDirs(), engines, 'Busy rollback must not replace the engine after the stream finishes');
 	console.log('Ordinary reconfigure preserved the engine, summary and prefix; held streaming replacement returned busy and finished normally');
 
 	const failureStart = cpa.log.length;
 	const invalid = await publishLibrary(fixtureVersion(2));
 	await reconfigure(13);
 	await eventually(() => cpa.log.slice(failureStart).split('\n').some(line => line.includes('failed to load plugin omp-billion-context from') && line.includes(basename(invalid))), 'Invalid replacement did not fail in the native loader after quiesce');
-	await assertEngineStopped(engineConfig, engines[0]);
 	await rm(invalid, { force: true });
-	const recovered = await coldRecovery(engines[0]);
+	await coldRecovery();
 	console.log('Invalid-library loading failed after old quiesce; CPA rollback resumed a fresh lazy engine with complete client history');
 
 	if (replacementLibrary) {
@@ -641,8 +664,7 @@ try {
 		activeLibrary = await publishLibrary(fixtureVersion(3), replacementLibrary);
 		await reconfigure(14);
 		await eventually(() => cpa.log.slice(reloadStart).split('\n').some(line => line.includes('plugin hot reloaded') && line.includes(basename(activeLibrary))), 'Valid path-changing replacement did not become active');
-		await assertEngineStopped(recovered.config, recovered.instance);
-		await coldRecovery(recovered.instance);
+		await coldRecovery();
 		console.log('A distinct native image replaced the old path, released its engine and private instance, and reused the shared runtime');
 	} else {
 		console.log('Successful native-image replacement was not exercised; pass a distinct same-source replacement library as the third argument');
@@ -663,18 +685,14 @@ try {
 		assert.equal(resolve(entry.path), activeLibrary, 'Disable/re-enable must keep the same selected library');
 		return entry;
 	}
-	const beforeDisable = await engineDirs();
-	assert.equal(beforeDisable.length, 1);
-	const disabledConfig = JSON.parse(await readFile(join(dataRoot, 'instances', beforeDisable[0], 'bili.json'), 'utf8'));
 	const disableLogStart = cpa.log.length;
 	await setEnabled(false);
 	await eventually(async () => (await engineDirs()).length === 0 && cpa.log.slice(disableLogStart).split('\n').some(line => line.includes('plugin unloaded') && line.includes(basename(activeLibrary))), 'Disable did not complete native shutdown and cleanup');
-	await assertEngineStopped(disabledConfig, beforeDisable[0]);
 	const reenabled = await setEnabled(true);
 	assert.equal(reenabled.metadata?.version, pluginVersion, 'Reinitialized native metadata must match VERSION');
 	const reopenedShell = await fetch(cpaUrl + menu.path, { signal: AbortSignal.timeout(3000) });
 	assert.equal(reopenedShell.status, 200, await reopenedShell.text());
-	await coldRecovery(beforeDisable[0]);
+	await coldRecovery();
 	console.log('CPA disabled and re-enabled the same selected native image with a fresh host binding and lazy engine');
 	assert.deepEqual(await runtimeSnapshot(runtimeParent), originalRuntime, 'Real requests must not modify the installed runtime');
 	await stopCPA(cpa, dataRoot);
@@ -696,9 +714,7 @@ try {
 	assert.deepEqual(await engineDirs(), [], 'Restart must not start an engine before its first supported request');
 	await assertStoredFold();
 	await assert.rejects(stat(join(platformDir, 'omp-billion-context')), { code: 'ENOENT' });
-	const newInstances = await engineDirs();
-	assert.equal(newInstances.length, 1);
-	assert.notEqual(newInstances[0], engines[0], 'Each CPA start needs its own private instance');
+	assert.equal(await savedMarkers(), false);
 	assert.deepEqual(await runtimeSnapshot(runtimeParent), originalRuntime, 'Restart must reuse the same marker, executable identity, mtimes and content');
 	for (const stream of [false, true]) {
 		const response = await call('chat/completions', { model, messages, stream }, { 'x-acp-session': 'restart-session' });
@@ -726,7 +742,7 @@ try {
 			assert(streamedProbes.length > 0);
 		}
 		assert(!text.includes(hiddenReasoning), 'No private reasoning in the client response');
-		const answers = calls.filter(b => b.tools?.length);
+		const answers = calls.filter(b => b.tools?.length && JSON.stringify(b.messages).length <= 750000);
 		if (summaryMode !== 'empty') {
 			assert.equal(reply.status, 200, text);
 			assert.match(text, /smoke-ok/);
