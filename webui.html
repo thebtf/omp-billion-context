@@ -1494,8 +1494,10 @@
 			let openGeneration = 0;
 			let viewToken = 0;
 			let markerToken = 0;
+			let markerEpoch = 0;
 			let markers = null;
-			let markersSaving = false;
+			let markerSaving = null;
+			let markerStatus = null;
 			let lastSessionsHash = '#/sessions';
 			let viewState = {phase: 'login', message: ''};
 			let noticeDismissed = storeGet(savedNotice) === 'dismissed';
@@ -1623,13 +1625,18 @@
 				});
 			}
 
+			function failureCopy(status) {
+				if (status === 401 || status === 403) return {key: 'error.rejected'};
+				if (status === 503) return {key: 'error.unavailable'};
+				if (status === 404) return {key: 'error.notFound'};
+				if (status === 413) return {key: 'error.tooLarge'};
+				if (status === 400) return {key: 'error.read'};
+				return {key: 'error.status', vars: {status: String(status)}};
+			}
+
 			function failureMessage(status) {
-				if (status === 401 || status === 403) return t('error.rejected');
-				if (status === 503) return t('error.unavailable');
-				if (status === 404) return t('error.notFound');
-				if (status === 413) return t('error.tooLarge');
-				if (status === 400) return t('error.read');
-				return t('error.status', {status: String(status)});
+				const copy = failureCopy(status);
+				return t(copy.key, copy.vars);
 			}
 
 			function parseView(hash) {
@@ -1680,6 +1687,7 @@
 				key = '';
 				openGeneration++;
 				viewToken++;
+				resetMarkers();
 				clearSavedKey();
 				viewState = {phase: 'login', message};
 				render();
@@ -1768,7 +1776,7 @@
 				if (viewState.phase === 'error') return errorView(viewState.message, viewState.retry);
 				if (viewState.phase === 'loading') return loadingView(viewState.view);
 				if (viewState.phase === 'ready') {
-					if (viewState.view.kind === 'settings') {adoptMarkers(viewState.data); return settingsView();}
+					if (viewState.view.kind === 'settings') return settingsView();
 					if (viewState.view.kind === 'overview') return overviewView(viewState.data);
 					if (viewState.view.kind === 'sessions') return sessionsView(viewState.view, viewState.data);
 					return detailView(viewState.view, viewState.data);
@@ -1869,7 +1877,6 @@
 			}
 
 			function overviewView(data) {
-				adoptMarkers(data);
 				const c = ledgerCopy(); const recent = Array.isArray(data.recent) ? data.recent.filter(item => item && typeof item === 'object') : [];
 				return h('div', {class: 'journal'},
 					h('h2', {class: 'journal-title', id: 'view-heading', tabindex: '-1', text: c.journal}),
@@ -2025,13 +2032,23 @@
 			}
 
 			function settingsView() {
+				const pending = markerSaving;
 				const reported = typeof markers === 'boolean';
+				const shown = pending ? pending.wanted : markers === true;
 				const input = h('input', {
-					type: 'checkbox', id: 'markers', role: 'switch', checked: markers === true, disabled: !reported,
+					type: 'checkbox', id: 'markers', role: 'switch', checked: shown, disabled: Boolean(pending) || !reported,
 				});
-				const state = h('span', {id: 'marker-state', text: reported ? (markers ? t('settings.shown') : t('settings.hidden')) : t('settings.unreported')});
-				const status = h('p', {class: 'status', id: 'marker-status', role: 'status'});
-				input.addEventListener('change', () => saveMarkers(input, state, status));
+				const state = h('span', {
+					id: 'marker-state',
+					text: pending ? (pending.wanted ? t('settings.shown') : t('settings.hidden'))
+						: reported ? (markers ? t('settings.shown') : t('settings.hidden')) : t('settings.unreported'),
+				});
+				const status = h('p', {
+					class: 'status', id: 'marker-status', role: 'status',
+					'data-tone': markerStatus ? markerStatus.tone : null,
+					text: markerStatus ? t(markerStatus.key, markerStatus.vars) : '',
+				});
+				input.addEventListener('change', () => saveMarkers(input));
 
 				return h('section', {class: 'settings', 'aria-labelledby': 'settings-heading'},
 					h('div', {class: 'section-head'}, h('h2', {id: 'settings-heading', text: t('settings.heading')})),
@@ -2049,69 +2066,65 @@
 						: null);
 			}
 
-			function adoptMarkers(data) {
+			// The server-confirmed value is the only source of truth. A render, a
+			// language change or a failed save never replaces it. A payload read
+			// before a newer confirmation is not adopted over that confirmation.
+			function adoptMarkers(data, epoch) {
+				if (markerSaving || epoch !== markerEpoch) return;
 				markers = typeof data.visibilityMarkers === 'boolean' ? data.visibilityMarkers : null;
 			}
 
-			function markerLabel(state, value) {
-				state.textContent = value ? t('settings.shown') : t('settings.hidden');
+			function confirmMarkers(value) {
+				markerEpoch++;
+				markers = value;
+				if (viewState.phase === 'ready' && viewState.view && viewState.view.kind === 'settings' && viewState.data && typeof viewState.data === 'object') {
+					viewState.data.visibilityMarkers = value;
+				}
 			}
 
-			async function saveMarkers(input, state, status) {
-				if (markersSaving) return;
+			function resetMarkers() {
+				markerToken++;
+				markerSaving = null;
+				markerStatus = null;
+				markers = null;
+			}
+
+			async function saveMarkers(input) {
+				if (markerSaving) return;
 				const wanted = input.checked === true;
-				const previous = markers;
 				const token = ++markerToken;
-				markersSaving = true;
-				input.disabled = true;
-				status.removeAttribute('data-tone');
-				status.textContent = t('settings.saving');
+				markerSaving = {wanted};
+				markerStatus = {tone: null, key: 'settings.saving'};
+				render();
 				let response = null;
+				let body = null;
 				try {
-					response = await read('/__bili/settings', {method: 'PUT', body: {visibilityMarkers: wanted}});
+					response = await read('/__bili/settings', {method: 'PUT', body: {visibilityMarkers: wanted}, signal: AbortSignal.timeout(20000)});
+					if (response.ok) body = await response.json();
 				} catch {
 					response = null;
+					body = null;
 				}
+				// A newer save, a lock or a logout owns the state now; only the
+				// request that still holds the token is allowed to clear pending.
 				if (token !== markerToken) return;
-				markersSaving = false;
-				input.disabled = false;
+				markerSaving = null;
 				if (!response) {
-					input.checked = previous === true;
-					status.setAttribute('data-tone', 'bad');
-					status.textContent = t('settings.failed');
-					return;
-				}
-				if (response.status === 401 || response.status === 403) {
+					markerStatus = {tone: 'bad', key: 'settings.failed'};
+				} else if (response.status === 401 || response.status === 403) {
+					markerStatus = null;
 					lockOut(t('error.rejected'));
 					return;
-				}
-				if (!response.ok) {
-					input.checked = previous === true;
-					status.setAttribute('data-tone', 'bad');
-					status.textContent = failureMessage(response.status);
-					return;
-				}
-				let body = null;
-				try {body = await response.json();} catch {body = null;}
-				if (token !== markerToken) return;
-				const confirmed = body && typeof body === 'object' ? body.visibilityMarkers : undefined;
-				if (confirmed === wanted) {
-					markers = confirmed;
-					input.checked = markers;
-					markerLabel(state, markers);
-					status.setAttribute('data-tone', 'ok');
-					status.textContent = t('settings.saved');
-					return;
-				}
-				if (typeof confirmed === 'boolean') {
-					markers = confirmed;
-					input.checked = markers;
-					markerLabel(state, markers);
+				} else if (!response.ok) {
+					// The read copies talk about views; a save failure either means
+					// storage is unavailable or that the change was not confirmed.
+					markerStatus = response.status === 503 ? {tone: 'bad', key: 'error.unavailable'} : {tone: 'bad', key: 'settings.failed'};
 				} else {
-					input.checked = previous === true;
+					const confirmed = body && typeof body === 'object' ? body.visibilityMarkers : undefined;
+					if (typeof confirmed === 'boolean') confirmMarkers(confirmed);
+					markerStatus = confirmed === wanted ? {tone: 'ok', key: 'settings.saved'} : {tone: 'bad', key: 'settings.failed'};
 				}
-				status.setAttribute('data-tone', 'bad');
-				status.textContent = t('settings.failed');
+				render();
 			}
 
 			function setLanguage(named) {
@@ -2125,6 +2138,7 @@
 				key = '';
 				openGeneration++;
 				viewToken++;
+				resetMarkers();
 				clearSavedKey();
 				viewState = {phase: 'login', message: ''};
 				render();
@@ -2207,6 +2221,13 @@
 			}
 
 			async function load(hash, preload) {
+				// Every entry point invalidates the previous read, including the
+				// early returns below: a stale confirmation or error must not paint
+				// over the route the user has moved to.
+				const token = ++viewToken;
+				// A payload is adopted only if no newer confirmation landed while
+				// the read was in flight.
+				const epoch = markerEpoch;
 				const view = parseView(hash);
 				if (!view) {
 					history.replaceState(null, '', '#/overview');
@@ -2224,11 +2245,11 @@
 					return;
 				}
 				if (view.kind === 'overview' && preload && typeof preload === 'object') {
+					adoptMarkers(preload, epoch);
 					viewState = {phase: 'ready', view, data: preload};
 					render();
 					return;
 				}
-				const token = ++viewToken;
 				viewState = {phase: 'loading', view};
 				render();
 				let response = null;
@@ -2261,6 +2282,7 @@
 					render();
 					return;
 				}
+				adoptMarkers(data, epoch);
 				viewState = {phase: 'ready', view, data};
 				render();
 				if (view.kind !== 'overview') focusView();
