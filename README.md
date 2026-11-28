@@ -14,6 +14,9 @@ plugins:
       enabled: true
 ```
 
+> [!IMPORTANT]
+> If you use other model routers, set `omp-billion-context` to a higher `priority` number than all of them, including combo-router. Equal or unset priorities can let another router handle a request before compression.
+
 No extra model, upstream URL, key, Node.js installation, or background service is required. Keep sending requests to your existing CPA model with the normal CPA client key. Disable the plugin in CPA to stop compressing new requests.
 
 With a configured `plugins.configs.omp-billion-context.store.version` or `store.release-tag` pin, CPA requires that exact filename version. If the pinned version is missing, CPA does not load a matching plugin. Only without a pin does CPA prefer the highest versioned filename. The Plugin Store records its installed release in this configuration. For a manual update of a Store-managed installation, update or remove the old version pin as well. Reload CPA's configuration after installing the new file. Native replacement requires a changed selected path, so overwriting an unversioned library can leave the old native image running. The release packages use versioned filenames for manual and automated installation.

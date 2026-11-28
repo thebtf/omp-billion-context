@@ -178,7 +178,7 @@
 				const notice = document.createElement('aside');
 				notice.id = 'cpa-webui-notice';
 				notice.setAttribute('aria-label', 'CPA WebUI access');
-				notice.innerHTML = `<span>Overview and Sessions are read-only here; compression keeps its own settings.</span>
+				notice.innerHTML = `<span><strong>Router priority:</strong> If you use other model routers, set bili’s priority higher than theirs. Equal or unset priorities can let another router handle a request before compression. Overview and Sessions are read-only here.</span>
 					<button class="btn sm" type="button">Lock WebUI</button><span id="cpa-webui-status" role="status"></span>`;
 				notice.querySelector('button').addEventListener('click', () => {
 					key = '';
