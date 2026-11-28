@@ -45,6 +45,12 @@ const upstream = createServer(async (req, res) => {
 		const body = JSON.parse(Buffer.concat(chunks));
 		requests.push({ path: req.url, auth: req.headers.authorization, engineToken: req.headers['x-omp-bili-access'], body });
 		const base = { id: 'chatcmpl-smoke', created: 1, model: body.model };
+		if (body.stream && JSON.stringify(body.messages).includes('TWO_NATIVE_CHOICES')) {
+			res.writeHead(200, { 'content-type': 'text/event-stream' });
+			const choices = ['lookup_alpha', 'lookup_beta'].map((name, index) => ({ index, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'c' + index, type: 'function', function: { name, arguments: JSON.stringify({ index }) } }] }, finish_reason: null }));
+			res.write('data: ' + JSON.stringify({ ...base, object: 'chat.completion.chunk', choices }) + '\n\n');
+			return res.end('data: ' + JSON.stringify({ ...base, object: 'chat.completion.chunk', choices: choices.map(c => ({ index: c.index, delta: {}, finish_reason: 'tool_calls' })) }) + '\n\ndata: [DONE]\n\n');
+		}
 		if (repair && !body.stream && body.tools?.length) {
 			const attempt = ++repair.calls;
 			if (attempt <= 2) {
@@ -350,6 +356,11 @@ try {
 		'An unidentified conversation must still reach bili, which carries its own tools');
 	const account = requests.at(-1).auth;
 	assert([upstreamKey, 'synthetic-cpa-backup'].some(key => account === `Bearer ${key}`));
+
+	const multi = await call('chat/completions', { model, n: 2, stream: true, messages: [{ role: 'user', content: 'TWO_NATIVE_CHOICES' }] });
+	const choicesWire = await multi.text(); assert.equal(multi.status, 200, choicesWire);
+	assert.match(choicesWire, /lookup_alpha/); assert.match(choicesWire, /lookup_beta/);
+	assert.equal(requests.at(-1).body.tools?.length ?? 0, 0, 'Multiple choices must bypass the ACP executor entirely');
 
 	for (const [path, input] of [['chat/completions', { messages }], ['responses', { input: messages }]]) {
 		for (const stream of [false, true]) {

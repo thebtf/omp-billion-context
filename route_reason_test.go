@@ -81,3 +81,17 @@ func TestOnlyActionableReasonsAreLogged(t *testing.T) {
 		}
 	}
 }
+
+func TestMultipleChatChoicesStayOnCPARoute(t *testing.T) {
+	meta := map[string]any{"caller_scope": "a", "request_path": paths[chat]}
+	for _, tc := range []struct {
+		n      string
+		reason skipReason
+	}{{"1", compressible}, {"2", multipleChoices}, {"0", invalidPayload}} {
+		body := []byte(`{"model":"m","n":` + tc.n + `,"stream":true,"messages":[{"role":"user","content":"question"}]}`)
+		reason, _, _ := classify("m", chat, nil, meta, body)
+		if reason != tc.reason {
+			t.Errorf("n=%s: got %s, want %s", tc.n, reason, tc.reason)
+		}
+	}
+}

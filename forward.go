@@ -25,6 +25,12 @@ func (p *plugin) execute(req executorRequest) (any, *rpcError) {
 	if session == "" || paths[req.SourceFormat] == "" || req.SourceFormat != req.Format || req.Alt != "" || !json.Valid(req.Payload) {
 		return nil, kernelError("unsupported_request", "Request cannot be compressed safely", 400)
 	}
+	if req.SourceFormat == chat && !bytes.Equal(original, req.Payload) {
+		reason, _, _ := classify(req.Model, chat, req.Headers, req.Metadata, req.Payload)
+		if reason != compressible {
+			return nil, kernelError("unsupported_request", "Incompatible Chat execution payload", 400)
+		}
+	}
 	if req.SourceFormat == responses && !bytes.Equal(original, req.Payload) {
 		reason, _, actual := classify(req.Model, responses, req.Headers, req.Metadata, req.Payload)
 		if reason != compressible || len(actual) != len(groups) || (len(groups) > 0 && !groups.intact(req.Payload)) {
